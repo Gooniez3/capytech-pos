@@ -12,7 +12,14 @@ import {
   MIGRATIONS, IGNORE_PATTERN, migrationNames, parseArguments,
   connectionConfig, executeDatabaseCommand,
 } from './migrate.mjs';
-import { up, down, BASELINE_SQL } from '../migrations/1788652800000_baseline.mjs';
+import { up as baselineUp, down as baselineDown, BASELINE_SQL } from '../migrations/1788652800000_baseline.mjs';
+import {
+  up as p04Up, down as p04Down, UP_SQL as P04_UP_SQL, DOWN_SQL as P04_DOWN_SQL,
+  CONSTRAINT_NAMES as P04_CONSTRAINT_NAMES,
+} from '../migrations/1788652800001_p04-database-constraints.mjs';
+
+const P04 = '1788652800001_p04-database-constraints';
+const EXPECTED_MIGRATIONS = [BASELINE, P04];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -119,28 +126,71 @@ test('registration plan can fake only the named baseline, never future migration
 });
 
 test('baseline down is blocked and later rollback selects one migration',()=>{
-  assert.throws(down,/intentionally blocked/);
+  assert.throws(baselineDown,/intentionally blocked/);
   assert.throws(()=>planCommand('down','baselined',[BASELINE]),/intentionally blocked/);
   assert.deepEqual(planCommand('down','migrated',[BASELINE,'future']),{direction:'down',fake:false,count:1});
 });
 
 test('fresh baseline rejects populated schema before queuing SQL',async()=>{
   let queued=false;
-  await assert.rejects(up({db:catalogClient(expected),sql(){queued=true;}}),/empty application schema/);
+  await assert.rejects(baselineUp({db:catalogClient(expected),sql(){queued=true;}}),/empty application schema/);
   assert.equal(queued,false);
 });
 
-test('installed node-pg-migrate loads only the baseline and compiles it deterministically without executing DDL',async()=>{
+test('installed node-pg-migrate loads the baseline and P0.4 migration deterministically without executing DDL',async()=>{
   const client=catalogClient(empty());
   const migrations=await loadMigrations(client,{dir:MIGRATIONS,ignorePattern:IGNORE_PATTERN},console);
-  assert.deepEqual(migrations.map(m=>m.name),[BASELINE]);
-  const build=async()=>{
+  assert.deepEqual(migrations.map(m=>m.name),EXPECTED_MIGRATIONS);
+  const buildBaseline=async()=>{
     const builder=new MigrationBuilder(client,{},false,console);
     await migrations[0].up(builder);
     return builder.getSql();
   };
-  assert.equal(await build(),await build());
+  const buildP04=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[1].up(builder);
+    return builder.getSql();
+  };
+  assert.equal(await buildBaseline(),await buildBaseline());
+  assert.equal(await buildP04(),await buildP04());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('P0.4 adds only approved integrity constraints and reverses only its own changes',()=>{
+  assert.equal(P04_CONSTRAINT_NAMES.length,19);
+  assert.equal(new Set(P04_CONSTRAINT_NAMES).size,P04_CONSTRAINT_NAMES.length);
+  for(const name of P04_CONSTRAINT_NAMES) {
+    assert.match(P04_UP_SQL,new RegExp(`ADD CONSTRAINT ${name} CHECK`));
+    assert.match(P04_DOWN_SQL,new RegExp(`DROP CONSTRAINT ${name}`));
+  }
+  for(const sql of [P04_UP_SQL,P04_DOWN_SQL]) {
+    assert.doesNotMatch(sql,/\b(INSERT|UPDATE|DELETE|CREATE|TRUNCATE|SETVAL|NEXTVAL|RESTART)\b/i);
+    assert.doesNotMatch(sql,/\b(invoice_number|idempotency_key|refund_reason|refunded_by|product_id|variant_id|qr_code)\b/i);
+  }
+  assert.match(P04_UP_SQL,/ALTER COLUMN status SET NOT NULL/);
+  assert.match(P04_UP_SQL,/ALTER COLUMN payment_method SET NOT NULL/);
+  assert.match(P04_UP_SQL,/ALTER COLUMN tax SET NOT NULL/);
+  assert.match(P04_UP_SQL,/ALTER COLUMN discount SET NOT NULL/);
+  assert.doesNotMatch(P04_UP_SQL,/ALTER COLUMN (subtotal|total) SET NOT NULL/);
+  assert.match(P04_DOWN_SQL,/ALTER COLUMN status DROP NOT NULL/);
+  assert.match(P04_DOWN_SQL,/ALTER COLUMN sale_id DROP NOT NULL/);
+  assert.doesNotMatch(P04_DOWN_SQL,/ALTER COLUMN (subtotal|total) DROP NOT NULL/);
+});
+
+test('P0.4 queues deterministic up and down SQL without querying or mutating the test client',()=>{
+  const client=catalogClient(empty());
+  const build=(migration)=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    migration(builder);
+    return builder.getSql();
+  };
+  const upSql=build(p04Up);
+  const downSql=build(p04Down);
+  assert.equal(upSql,build(p04Up));
+  assert.equal(downSql,build(p04Down));
+  assert.ok(upSql.includes(P04_UP_SQL));
+  assert.ok(downSql.includes(P04_DOWN_SQL));
+  assert.deepEqual(client.queries,[]);
 });
 
 test('static baseline contains all captured schema definitions without data writes or destructive SQL',()=>{
@@ -213,5 +263,5 @@ test('CLI rejects unsafe runner flags and requires an exact write target',async(
 });
 
 test('only expected migration files are discovered',async()=>{
-  assert.deepEqual(await migrationNames(),[BASELINE]);
+  assert.deepEqual(await migrationNames(),EXPECTED_MIGRATIONS);
 });
