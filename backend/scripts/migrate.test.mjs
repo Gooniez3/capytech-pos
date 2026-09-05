@@ -17,9 +17,14 @@ import {
   up as p04Up, down as p04Down, UP_SQL as P04_UP_SQL, DOWN_SQL as P04_DOWN_SQL,
   CONSTRAINT_NAMES as P04_CONSTRAINT_NAMES,
 } from '../migrations/1788652800001_p04-database-constraints.mjs';
+import {
+  up as p06Up, down as p06Down, UP_SQL as P06_UP_SQL, DOWN_SQL as P06_DOWN_SQL,
+  CONSTRAINT_NAMES as P06_CONSTRAINT_NAMES,
+} from '../migrations/1788652800002_p06-checkout-request-fingerprint.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
-const EXPECTED_MIGRATIONS = [BASELINE, P04];
+const P06 = '1788652800002_p06-checkout-request-fingerprint';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -137,7 +142,7 @@ test('fresh baseline rejects populated schema before queuing SQL',async()=>{
   assert.equal(queued,false);
 });
 
-test('installed node-pg-migrate loads the baseline and P0.4 migration deterministically without executing DDL',async()=>{
+test('installed node-pg-migrate loads all migrations deterministically without executing DDL',async()=>{
   const client=catalogClient(empty());
   const migrations=await loadMigrations(client,{dir:MIGRATIONS,ignorePattern:IGNORE_PATTERN},console);
   assert.deepEqual(migrations.map(m=>m.name),EXPECTED_MIGRATIONS);
@@ -151,9 +156,44 @@ test('installed node-pg-migrate loads the baseline and P0.4 migration determinis
     await migrations[1].up(builder);
     return builder.getSql();
   };
+  const buildP06=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[2].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
+  assert.equal(await buildP06(),await buildP06());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('P0.6 adds only the nullable fingerprint column and its two named checks',()=>{
+  assert.deepEqual(P06_CONSTRAINT_NAMES,[
+    'sales_checkout_request_fingerprint_length_chk',
+    'sales_checkout_request_fingerprint_requires_key_chk',
+  ]);
+  assert.match(P06_UP_SQL,/ADD COLUMN checkout_request_fingerprint bytea/);
+  assert.match(P06_UP_SQL,/octet_length\(checkout_request_fingerprint\) = 32/);
+  assert.match(P06_UP_SQL,/checkout_request_fingerprint IS NULL\s+OR idempotency_key IS NOT NULL/);
+  assert.doesNotMatch(P06_UP_SQL,/checkout_request_fingerprint bytea NOT NULL/);
+  assert.doesNotMatch(P06_UP_SQL,/\b(INSERT|UPDATE|DELETE|TRUNCATE|SETVAL|NEXTVAL|RESTART|CREATE INDEX)\b/i);
+  assert.match(P06_DOWN_SQL,/DROP CONSTRAINT sales_checkout_request_fingerprint_requires_key_chk/);
+  assert.match(P06_DOWN_SQL,/DROP CONSTRAINT sales_checkout_request_fingerprint_length_chk/);
+  assert.match(P06_DOWN_SQL,/DROP COLUMN checkout_request_fingerprint/);
+});
+
+test('P0.6 queues deterministic up and down SQL without querying the test client',()=>{
+  const client=catalogClient(empty());
+  const build=(migration)=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    migration(builder);
+    return builder.getSql();
+  };
+  assert.equal(build(p06Up),build(p06Up));
+  assert.equal(build(p06Down),build(p06Down));
+  assert.ok(build(p06Up).includes(P06_UP_SQL));
+  assert.ok(build(p06Down).includes(P06_DOWN_SQL));
+  assert.deepEqual(client.queries,[]);
 });
 
 test('P0.4 adds only approved integrity constraints and reverses only its own changes',()=>{

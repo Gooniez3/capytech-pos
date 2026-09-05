@@ -7,6 +7,11 @@ const {
   revalidateCurrentAdmin,
   restoreExactInventory,
 } = require('../services/sale-reversal');
+const {
+  createCheckoutFingerprint,
+  findExistingCheckout,
+  normalizePaymentMethod,
+} = require('../services/checkout-fingerprint');
 
 const router = express.Router();
 
@@ -208,23 +213,15 @@ router.post('/', requireAuth, async (req, res) => {
     });
   }
 
-  const allowedPaymentMethods = [
-    'cash',
-    'banking',
-    'kbzpay',
-    'wavepay',
-    'mmqr',
-  ];
-
   const paymentMethod =
-    allowedPaymentMethods.includes(payment_method)
-      ? payment_method
-      : 'cash';
+    normalizePaymentMethod(payment_method);
 
   const idempotencyKey =
   typeof idempotency_key === 'string'
     ? idempotency_key.trim()
     : '';
+
+let checkoutFingerprint = null;
 
 if (idempotencyKey) {
   const uuidPattern =
@@ -236,44 +233,44 @@ if (idempotencyKey) {
     });
   }
 
-  /*
-   * If this checkout was already completed,
-   * return the original sale instead of
-   * deducting inventory again.
-   */
-  const existingSaleResult =
-    await pool.query(
-      `
-        SELECT *
-        FROM sales
-        WHERE idempotency_key = $1
-        LIMIT 1
-      `,
-      [idempotencyKey]
+  try {
+    checkoutFingerprint = createCheckoutFingerprint({
+      user_id: req.user.id,
+      items,
+      payment_method: paymentMethod,
+      discount,
+      customer_id,
+      customer_name,
+      customer_phone,
+      customer_email,
+      customer_address,
+    });
+
+    const existingCheckout = await findExistingCheckout(
+      pool,
+      idempotencyKey,
+      checkoutFingerprint
     );
 
-  const existingSale =
-    existingSaleResult.rows[0];
+    if (existingCheckout) {
+      return res.status(200).json({
+        ...existingCheckout,
+        duplicate: true,
+      });
+    }
+  } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({
+        error: err.message,
+      });
+    }
 
-  if (existingSale) {
-    const existingItemsResult =
-      await pool.query(
-        `
-          SELECT *
-          FROM sale_items
-          WHERE sale_id = $1
-          ORDER BY id
-        `,
-        [existingSale.id]
-      );
-
-    return res.status(200).json({
-      sale: existingSale,
-      items: existingItemsResult.rows,
-      duplicate: true,
+    console.error('Checkout idempotency lookup failed');
+    return res.status(500).json({
+      error: 'Checkout failed',
     });
   }
-}    
+}
 
   const client = await pool.connect();
 
@@ -307,37 +304,17 @@ if (idempotencyKey) {
       [idempotencyKey]
     );
 
-    const duplicateSaleResult =
-      await client.query(
-        `
-          SELECT *
-          FROM sales
-          WHERE idempotency_key = $1
-          LIMIT 1
-        `,
-        [idempotencyKey]
-      );
+    const duplicateCheckout = await findExistingCheckout(
+      client,
+      idempotencyKey,
+      checkoutFingerprint
+    );
 
-    const duplicateSale =
-      duplicateSaleResult.rows[0];
-
-    if (duplicateSale) {
-      const duplicateItemsResult =
-        await client.query(
-          `
-            SELECT *
-            FROM sale_items
-            WHERE sale_id = $1
-            ORDER BY id
-          `,
-          [duplicateSale.id]
-        );
-
+    if (duplicateCheckout) {
       await client.query('COMMIT');
 
       return res.status(200).json({
-        sale: duplicateSale,
-        items: duplicateItemsResult.rows,
+        ...duplicateCheckout,
         duplicate: true,
       });
     }
@@ -788,13 +765,14 @@ const customerAddress =
       discount,
       total,
       payment_method,
-      idempotency_key
+      idempotency_key,
+      checkout_request_fingerprint
     )
     VALUES (
       $1, $2, $3,
       $4, $5, $6, $7,
       $8, $9, $10, $11,
-      $12
+      $12, $13
     )
     RETURNING *
   `,
@@ -814,6 +792,7 @@ const customerAddress =
     paymentMethod,
 
     idempotencyKey || null,
+    checkoutFingerprint,
   ]
 );
 
@@ -878,7 +857,7 @@ const customerAddress =
 
     console.error(err);
 
-    res.status(400).json({
+    res.status(err.statusCode || 400).json({
       error:
         err.message ||
         'Checkout failed',

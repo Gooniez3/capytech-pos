@@ -2,6 +2,10 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import {
+  clearCheckoutKey,
+  getOrCreateCheckoutKey,
+} from '../utils/checkoutIdempotency';
 
 export default function POS() {
   const [products, setProducts] = useState([]);
@@ -10,6 +14,7 @@ export default function POS() {
   const [message, setMessage] = useState('');
   const [checkingOut, setCheckingOut] = useState(false);
   const scanRef = useRef(null);
+  const checkoutKeyRef = useRef(null);
   const { user, logout } = useAuth();
 
   useEffect(() => {
@@ -83,6 +88,7 @@ export default function POS() {
   const handleCheckout = async () => {
     if (cart.length === 0) return;
     setCheckingOut(true);
+    const checkoutKey = getOrCreateCheckoutKey(checkoutKeyRef);
     try {
       const res = await api.post('/sales', {
         items: cart.map((item) => ({
@@ -90,8 +96,10 @@ export default function POS() {
           quantity: item.quantity,
         })),
         payment_method: 'cash',
+        idempotency_key: checkoutKey,
       });
 
+      clearCheckoutKey(checkoutKeyRef);
       setMessage(`Sale complete! Invoice ${res.data.sale.invoice_number}`);
       setCart([]);
       loadProducts(); // refresh stock counts
