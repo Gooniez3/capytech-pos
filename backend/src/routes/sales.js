@@ -1,6 +1,12 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const {
+  assertSaleCanBeReversed,
+  assertSaleItemsCanBeReversed,
+  revalidateCurrentAdmin,
+  restoreExactInventory,
+} = require('../services/sale-reversal');
 
 const router = express.Router();
 
@@ -964,6 +970,8 @@ router.post(
     try {
       await client.query('BEGIN');
 
+      await revalidateCurrentAdmin(client, req.user.id);
+
       // Find and lock the sale
       const saleResult = await client.query(
         `
@@ -981,26 +989,7 @@ router.post(
         throw new Error('Sale not found');
       }
 
-      // Only completed sales can be voided.
-// This prevents refunded/voided sales from
-// restoring inventory more than once.
-if (sale.status !== 'completed') {
-  if (sale.status === 'voided') {
-    throw new Error(
-      'This sale has already been voided'
-    );
-  }
-
-  if (sale.status === 'refunded') {
-    throw new Error(
-      'A refunded sale cannot be voided'
-    );
-  }
-
-  throw new Error(
-    'Only completed sales can be voided'
-  );
-}
+      assertSaleCanBeReversed(sale, 'void');
 
       // Get sale items
       const itemsResult = await client.query(
@@ -1012,40 +1001,8 @@ if (sale.status !== 'completed') {
         [req.params.id]
       );
 
-      // Restore exact stock
-      for (const item of itemsResult.rows) {
-        if (item.variant_id) {
-          // Variant sale
-          await client.query(
-            `
-            UPDATE product_variants
-            SET
-              stock_quantity = stock_quantity + $1,
-              updated_at = NOW()
-            WHERE id = $2
-            `,
-            [
-              item.quantity,
-              item.variant_id,
-            ]
-          );
-        } else {
-          // Normal product sale
-          await client.query(
-            `
-            UPDATE products
-            SET
-              stock_quantity = stock_quantity + $1,
-              updated_at = NOW()
-            WHERE id = $2
-            `,
-            [
-              item.quantity,
-              item.product_id,
-            ]
-          );
-        }
-      }
+      assertSaleItemsCanBeReversed(itemsResult.rows, 'void');
+      await restoreExactInventory(client, itemsResult.rows);
 
       // Mark sale as voided
       await client.query(
@@ -1088,7 +1045,7 @@ if (sale.status !== 'completed') {
 
       console.error(err);
 
-      res.status(400).json({
+      res.status(err.statusCode || 400).json({
         error:
           err.message ||
           'Failed to void sale',
@@ -1146,6 +1103,8 @@ router.post(
 
       await client.query('BEGIN');
 
+      await revalidateCurrentAdmin(client, req.user.id);
+
       /*
        * =====================================================
        * FIND AND LOCK SALE
@@ -1178,32 +1137,7 @@ router.post(
        * =====================================================
        */
 
-      if (
-        sale.status ===
-        'refunded'
-      ) {
-        throw new Error(
-          'This sale has already been refunded'
-        );
-      }
-
-      if (
-        sale.status ===
-        'voided'
-      ) {
-        throw new Error(
-          'A voided sale cannot be refunded'
-        );
-      }
-
-      if (
-        sale.status !==
-        'completed'
-      ) {
-        throw new Error(
-          'Only completed sales can be refunded'
-        );
-      }
+      assertSaleCanBeReversed(sale, 'refund');
 
       /*
        * =====================================================
@@ -1221,14 +1155,7 @@ router.post(
           [req.params.id]
         );
 
-      if (
-        itemsResult.rows.length ===
-        0
-      ) {
-        throw new Error(
-          'This sale has no items to refund'
-        );
-      }
+      assertSaleItemsCanBeReversed(itemsResult.rows, 'refund');
 
       /*
        * =====================================================
@@ -1236,60 +1163,7 @@ router.post(
        * =====================================================
        */
 
-      for (
-        const item of
-        itemsResult.rows
-      ) {
-        /*
-         * Variant item
-         */
-
-        if (item.variant_id) {
-          await client.query(
-            `
-              UPDATE product_variants
-
-              SET
-                stock_quantity =
-                  stock_quantity + $1,
-
-                updated_at = NOW()
-
-              WHERE id = $2
-            `,
-            [
-              item.quantity,
-              item.variant_id,
-            ]
-          );
-        } else {
-          /*
-           * Normal product
-           */
-
-          if (
-            item.product_id
-          ) {
-            await client.query(
-              `
-                UPDATE products
-
-                SET
-                  stock_quantity =
-                    stock_quantity + $1,
-
-                  updated_at = NOW()
-
-                WHERE id = $2
-              `,
-              [
-                item.quantity,
-                item.product_id,
-              ]
-            );
-          }
-        }
-      }
+      await restoreExactInventory(client, itemsResult.rows);
 
       /* =====================================================
    LOAD REFUNDING USER
@@ -1442,7 +1316,7 @@ await createRefundNotifications(
         err
       );
 
-      res.status(400).json({
+      res.status(err.statusCode || 400).json({
         error:
           err.message ||
           'Failed to refund sale',

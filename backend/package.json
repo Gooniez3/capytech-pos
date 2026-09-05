@@ -12,7 +12,8 @@
     "migrate:baseline": "node scripts/migrate.mjs baseline",
     "migrate:check": "node scripts/migrate.mjs check",
     "migrate:status": "node scripts/migrate.mjs status",
-    "test:migrations": "node --test scripts/migrate.test.mjs"
+    "test:migrations": "node --test scripts/migrate.test.mjs",
+    "test:refund-void": "node --test src/services/sale-reversal.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
