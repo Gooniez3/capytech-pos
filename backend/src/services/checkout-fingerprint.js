@@ -8,6 +8,9 @@ const ALLOWED_PAYMENT_METHODS = Object.freeze([
   'mmqr',
 ]);
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 class CheckoutIntentError extends Error {
   constructor(message) {
     super(message);
@@ -63,6 +66,20 @@ function normalizePaymentMethod(value) {
   return ALLOWED_PAYMENT_METHODS.includes(value)
     ? value
     : 'cash';
+}
+
+function normalizeRequiredIdempotencyKey(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new CheckoutIntentError('Checkout idempotency key is required');
+  }
+
+  const key = value.trim();
+
+  if (!UUID_PATTERN.test(key)) {
+    throw new CheckoutIntentError('Invalid checkout idempotency key');
+  }
+
+  return key;
 }
 
 function normalizeDiscount(value) {
@@ -236,5 +253,6 @@ module.exports = {
   findExistingCheckout,
   normalizeDiscount,
   normalizePaymentMethod,
+  normalizeRequiredIdempotencyKey,
   serializeCheckoutIntent,
 };

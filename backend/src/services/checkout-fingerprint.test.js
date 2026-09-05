@@ -8,6 +8,7 @@ const {
   canonicalizeCheckoutIntent,
   createCheckoutFingerprint,
   findExistingCheckout,
+  normalizeRequiredIdempotencyKey,
 } = require('./checkout-fingerprint');
 
 const baseRequest = () => ({
@@ -164,12 +165,170 @@ test('legacy keyed sale with NULL fingerprint returns a controlled conflict', as
   );
 });
 
-test('checkout route retains advisory locking, optional keys, and atomic fingerprint storage', async () => {
+for (const [name, value] of [
+  ['missing', undefined],
+  ['null', null],
+  ['empty', ''],
+  ['whitespace', '   '],
+]) {
+  test(`${name} checkout idempotency key is rejected with HTTP status 400`, () => {
+    assert.throws(
+      () => normalizeRequiredIdempotencyKey(value),
+      error => error.statusCode === 400 && /required/.test(error.message)
+    );
+  });
+}
+
+test('malformed checkout idempotency key is rejected with HTTP status 400', () => {
+  assert.throws(
+    () => normalizeRequiredIdempotencyKey('not-a-uuid'),
+    error => error.statusCode === 400 && /Invalid/.test(error.message)
+  );
+});
+
+test('valid checkout UUID is accepted and trimmed', () => {
+  assert.equal(
+    normalizeRequiredIdempotencyKey('  123e4567-e89b-42d3-a456-426614174000  '),
+    '123e4567-e89b-42d3-a456-426614174000'
+  );
+});
+
+test('checkout route retains advisory locking and atomic fingerprint storage', async () => {
   const source = await readFile(join(__dirname, '..', 'routes', 'sales.js'), 'utf8');
   assert.match(source, /SELECT pg_advisory_xact_lock\(/);
   assert.match(source, /hashtextextended\(\$1, 0\)/);
-  assert.match(source, /let checkoutFingerprint = null/);
+  assert.match(source, /normalizeRequiredIdempotencyKey\(idempotency_key\)/);
   assert.match(source, /idempotency_key,\s*checkout_request_fingerprint/);
-  assert.match(source, /idempotencyKey \|\| null,\s*checkoutFingerprint/);
+  assert.match(source, /idempotencyKey,\s*checkoutFingerprint/);
   assert.ok(source.indexOf('pg_advisory_xact_lock') < source.indexOf('const duplicateCheckout'));
+});
+
+function checkoutHandler() {
+  const router = require('../routes/sales');
+  return router.stack.find(layer => layer.route?.path === '/' && layer.route.methods.post)
+    .route.stack.at(-1).handle;
+}
+
+function responseRecorder() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+}
+
+async function withMockPool(mock, callback) {
+  const pool = require('../db/pool');
+  const originalQuery = pool.query;
+  const originalConnect = pool.connect;
+  pool.query = mock.query;
+  pool.connect = mock.connect;
+  try {
+    return await callback();
+  } finally {
+    pool.query = originalQuery;
+    pool.connect = originalConnect;
+  }
+}
+
+const validCheckoutBody = key => ({
+  items: [{ product_id: 12, quantity: 1 }],
+  payment_method: 'cash',
+  idempotency_key: key,
+});
+
+for (const [name, key] of [
+  ['missing', undefined],
+  ['null', null],
+  ['empty', ''],
+  ['whitespace', '   '],
+  ['malformed', 'not-a-uuid'],
+]) {
+  test(`${name} key returns HTTP 400 before any database or stock operation`, async () => {
+    let databaseCalls = 0;
+    const failIfCalled = async () => {
+      databaseCalls += 1;
+      throw new Error('Database must not be called');
+    };
+
+    await withMockPool({ query: failIfCalled, connect: failIfCalled }, async () => {
+      const response = responseRecorder();
+      await checkoutHandler()(
+        { body: validCheckoutBody(key), user: { id: 7 } },
+        response
+      );
+      assert.equal(response.statusCode, 400);
+      assert.equal(databaseCalls, 0);
+    });
+  });
+}
+
+test('valid UUID creates a keyed sale and deducts stock once', async () => {
+  const key = '123e4567-e89b-42d3-a456-426614174000';
+  const queries = [];
+  let released = false;
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values });
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+      if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+        return { rows: [{
+          id: 12,
+          name: 'Mouse',
+          sku: 'MOUSE',
+          price: '100',
+          cost: '50',
+          stock_quantity: 10,
+          low_stock_threshold: 2,
+        }] };
+      }
+      if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
+        return { rows: [{ count: 0 }] };
+      }
+      if (sql.includes('UPDATE products')) {
+        return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
+      }
+      if (sql.includes("nextval(")) return { rows: [{ invoice_number: '1' }] };
+      if (sql.includes('INSERT INTO sales')) {
+        assert.equal(values.at(-2), key);
+        assert.ok(Buffer.isBuffer(values.at(-1)));
+        assert.equal(values.at(-1).length, 32);
+        return { rows: [{ id: 51, invoice_number: 'INV-000001', idempotency_key: key }] };
+      }
+      if (sql.includes('INSERT INTO sale_items')) return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    release() {
+      released = true;
+    },
+  };
+
+  await withMockPool({
+    query: async sql => {
+      assert.match(sql, /FROM sales/);
+      return { rows: [] };
+    },
+    connect: async () => client,
+  }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()(
+      { body: validCheckoutBody(key), user: { id: 7 } },
+      response
+    );
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.body.sale.idempotency_key, key);
+  });
+
+  assert.equal(queries.filter(entry => entry.sql.includes('UPDATE products')).length, 1);
+  assert.equal(queries.filter(entry => entry.sql.includes('INSERT INTO sales')).length, 1);
+  assert.equal(released, true);
 });

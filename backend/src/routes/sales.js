@@ -11,6 +11,7 @@ const {
   createCheckoutFingerprint,
   findExistingCheckout,
   normalizePaymentMethod,
+  normalizeRequiredIdempotencyKey,
 } = require('../services/checkout-fingerprint');
 
 const router = express.Router();
@@ -213,25 +214,20 @@ router.post('/', requireAuth, async (req, res) => {
     });
   }
 
+  let idempotencyKey;
+
+  try {
+    idempotencyKey = normalizeRequiredIdempotencyKey(idempotency_key);
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({
+      error: err.message,
+    });
+  }
+
   const paymentMethod =
     normalizePaymentMethod(payment_method);
 
-  const idempotencyKey =
-  typeof idempotency_key === 'string'
-    ? idempotency_key.trim()
-    : '';
-
-let checkoutFingerprint = null;
-
-if (idempotencyKey) {
-  const uuidPattern =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-  if (!uuidPattern.test(idempotencyKey)) {
-    return res.status(400).json({
-      error: 'Invalid checkout idempotency key',
-    });
-  }
+  let checkoutFingerprint;
 
   try {
     checkoutFingerprint = createCheckoutFingerprint({
@@ -270,7 +266,6 @@ if (idempotencyKey) {
       error: 'Checkout failed',
     });
   }
-}
 
   const client = await pool.connect();
 
@@ -294,30 +289,28 @@ if (idempotencyKey) {
    *
    * Stock is therefore deducted only once.
    */
-  if (idempotencyKey) {
-    await client.query(
-      `
-        SELECT pg_advisory_xact_lock(
-          hashtextextended($1, 0)
-        )
-      `,
-      [idempotencyKey]
-    );
+  await client.query(
+    `
+      SELECT pg_advisory_xact_lock(
+        hashtextextended($1, 0)
+      )
+    `,
+    [idempotencyKey]
+  );
 
-    const duplicateCheckout = await findExistingCheckout(
-      client,
-      idempotencyKey,
-      checkoutFingerprint
-    );
+  const duplicateCheckout = await findExistingCheckout(
+    client,
+    idempotencyKey,
+    checkoutFingerprint
+  );
 
-    if (duplicateCheckout) {
-      await client.query('COMMIT');
+  if (duplicateCheckout) {
+    await client.query('COMMIT');
 
-      return res.status(200).json({
-        ...duplicateCheckout,
-        duplicate: true,
-      });
-    }
+    return res.status(200).json({
+      ...duplicateCheckout,
+      duplicate: true,
+    });
   }
 
   let customerId = null;
@@ -791,7 +784,7 @@ const customerAddress =
     total,
     paymentMethod,
 
-    idempotencyKey || null,
+    idempotencyKey,
     checkoutFingerprint,
   ]
 );
