@@ -1,0 +1,217 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { MigrationBuilder } from 'node-pg-migrate';
+import { loadMigrations } from 'node-pg-migrate/runner';
+import {
+  BASELINE, QUERIES, inspectSchema, isEmptySchema, schemaDifferences,
+  assertBaseline, classifyDatabase, planCommand, readHistory,
+} from './lib/schema-inspection.mjs';
+import {
+  MIGRATIONS, IGNORE_PATTERN, migrationNames, parseArguments,
+  connectionConfig, executeDatabaseCommand,
+} from './migrate.mjs';
+import { up, down, BASELINE_SQL } from '../migrations/1788652800000_baseline.mjs';
+
+const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
+const clone = () => structuredClone(expected);
+const empty = () => Object.fromEntries(Object.entries(expected).map(([k,v])=>[k,['schemas','extensions'].includes(k)?structuredClone(v):[]]));
+const config = connectionConfig({DB_HOST:'localhost',DB_PORT:'5432',DB_NAME:'unit_test_only',DB_USER:'test',DB_PASSWORD:'test'},true);
+
+function catalogClient(snapshot) {
+  const queries = [];
+  return {
+    queries,
+    async connect() {}, async end() {},
+    async query(sql) {
+      queries.push(sql);
+      const section = Object.keys(QUERIES).find(k=>QUERIES[k]===sql);
+      if (section) return {rows:structuredClone(snapshot[section])};
+      if (['BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY','COMMIT','ROLLBACK'].includes(sql)) return {rows:[]};
+      if (sql.includes("current_setting('server_version_num')")) return {rows:[{database:'unit_test_only',version:170011,read_only:'on'}]};
+      if (sql.includes("c.relname='pgmigrations'")) return {rows:[]};
+      throw new Error(`Unexpected SQL in metadata-only test: ${sql}`);
+    },
+  };
+}
+
+test('metadata inspection uses only catalog SELECTs and never evaluates sequences', async()=>{
+  const client = catalogClient(expected);
+  assert.deepEqual(await inspectSchema(client),expected);
+  for (const sql of client.queries) {
+    assert.match(sql,/^SELECT /);
+    assert.match(sql,/pg_catalog\./);
+    assert.doesNotMatch(sql,/\b(nextval|setval|last_value)\s*\(/i);
+    assert.doesNotMatch(sql,/\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE)\b/i);
+  }
+});
+
+test('exact baseline matches independent of catalog row order',()=>{
+  const actual = clone();
+  for (const rows of Object.values(actual)) rows.reverse();
+  assert.deepEqual(schemaDifferences(expected,actual),[]);
+});
+
+const driftCases = {
+  'missing customer column':s=>{s.columns=s.columns.filter(c=>!(c.table_name==='sales' && c.name==='customer_id'));},
+  'incompatible idempotency type':s=>{s.columns.find(c=>c.name==='idempotency_key').type='text';},
+  'changed nullable setting':s=>{s.columns.find(c=>c.table_name==='sale_items' && c.name==='unit_cost').not_null=false;},
+  'changed soft-delete default':s=>{s.columns.find(c=>c.table_name==='products' && c.name==='is_active').default_expression='false';},
+  'missing partial unique index':s=>{s.indexes=s.indexes.filter(i=>i.name!=='idx_sales_idempotency_key');},
+  'wrong index predicate':s=>{const i=s.indexes.find(i=>i.name==='idx_sales_idempotency_key');i.definition=i.definition.replace('IS NOT NULL','IS NULL');},
+  'invalid index':s=>{s.indexes[0].valid=false;},
+  'missing foreign key':s=>{s.constraints=s.constraints.filter(c=>c.name!=='sales_customer_id_fkey');},
+  'changed foreign key action':s=>{s.constraints.find(c=>c.name==='sales_customer_id_fkey').definition+=' DEFERRABLE';},
+  'unvalidated constraint':s=>{s.constraints[0].validated=false;},
+  'missing invoice sequence':s=>{s.sequences=s.sequences.filter(s=>s.name!=='invoice_number_seq');},
+  'changed sequence increment':s=>{s.sequences.find(s=>s.name==='invoice_number_seq').increment='2';},
+  'changed sequence ownership':s=>{s.sequences[0].owner_column='user_id';},
+  'unexpected column':s=>{s.columns.push({...s.columns[0],name:'unexpected'});},
+  'unexpected table':s=>{s.tables.push({...s.tables[0],name:'unexpected'});},
+  'unexpected trigger':s=>{s.triggers.push({name:'unexpected'});},
+  'unexpected function':s=>{s.routines.push({name:'unexpected'});},
+  'unexpected schema':s=>{s.schemas.push({name:'other'});},
+  'unexpected policy':s=>{s.policies.push({name:'unexpected'});},
+  'unexpected extension':s=>{s.extensions.push({name:'unexpected',schema:'public'});},
+  'unexpected enum':s=>{s.types.push({name:'unexpected',kind:'e'});},
+  'unexpected rule':s=>{s.rules.push({name:'unexpected'});},
+  'unexpected inheritance':s=>{s.inheritance.push({parent:'sales',child:'archive'});},
+  'unexpected event trigger':s=>{s.event_triggers.push({name:'unexpected'});},
+  'changed collation':s=>{s.columns.find(c=>c.name==='name').collation='pg_catalog.C';},
+  'enabled RLS':s=>{s.tables[0].rls=true;},
+  'incomplete inspection':s=>{delete s.sequences;},
+};
+for (const [name, mutate] of Object.entries(driftCases)) {
+  test(`fail closed: ${name}`,()=>{
+    const actual=clone(); mutate(actual);
+    assert.throws(()=>assertBaseline(expected,actual),/Schema drift detected/);
+    assert.equal(classifyDatabase(actual,[],expected,[BASELINE]),'drifted-unbaselined');
+  });
+}
+
+test('detect empty, matching, baselined and later-migrated databases',()=>{
+  assert.equal(classifyDatabase(empty(),[],expected,[BASELINE]),'empty');
+  assert.equal(classifyDatabase(expected,[],expected,[BASELINE]),'matching-unbaselined');
+  assert.equal(classifyDatabase(expected,[BASELINE],expected,[BASELINE]),'baselined');
+  const names=[BASELINE,'1788652800001_future'];
+  assert.equal(classifyDatabase(expected,names,expected,names),'migrated');
+  const partial=empty();partial.sequences=[expected.sequences[0]];
+  assert.equal(isEmptySchema(partial),false);
+  assert.equal(isEmptySchema({}),false);
+});
+
+test('reject unknown, duplicated, out-of-order history and missing baseline',()=>{
+  for (const history of [['unknown'],[BASELINE,BASELINE],['1788652800001_future']]) {
+    assert.throws(()=>classifyDatabase(expected,history,expected,[BASELINE,'1788652800001_future']),/migration history/);
+  }
+  assert.throws(()=>classifyDatabase(expected,[],expected,[]),/first migration/);
+});
+
+test('up never applies the fresh baseline to an unbaselined existing DB',()=>{
+  for(const state of ['matching-unbaselined','drifted-unbaselined']) assert.throws(()=>planCommand('up',state,[]),/not baselined/);
+  assert.deepEqual(planCommand('up','empty',[]),{direction:'up',fake:false});
+});
+
+test('registration plan can fake only the named baseline, never future migrations',()=>{
+  assert.deepEqual(planCommand('baseline','matching-unbaselined',[]),{direction:'up',fake:true,file:BASELINE,count:1});
+  for(const state of ['empty','drifted-unbaselined','baselined','migrated']) assert.throws(()=>planCommand('baseline',state,[]),/exact matching/);
+});
+
+test('baseline down is blocked and later rollback selects one migration',()=>{
+  assert.throws(down,/intentionally blocked/);
+  assert.throws(()=>planCommand('down','baselined',[BASELINE]),/intentionally blocked/);
+  assert.deepEqual(planCommand('down','migrated',[BASELINE,'future']),{direction:'down',fake:false,count:1});
+});
+
+test('fresh baseline rejects populated schema before queuing SQL',async()=>{
+  let queued=false;
+  await assert.rejects(up({db:catalogClient(expected),sql(){queued=true;}}),/empty application schema/);
+  assert.equal(queued,false);
+});
+
+test('installed node-pg-migrate loads only the baseline and compiles it deterministically without executing DDL',async()=>{
+  const client=catalogClient(empty());
+  const migrations=await loadMigrations(client,{dir:MIGRATIONS,ignorePattern:IGNORE_PATTERN},console);
+  assert.deepEqual(migrations.map(m=>m.name),[BASELINE]);
+  const build=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[0].up(builder);
+    return builder.getSql();
+  };
+  assert.equal(await build(),await build());
+  assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('static baseline contains all captured schema definitions without data writes or destructive SQL',()=>{
+  assert.equal((BASELINE_SQL.match(/CREATE TABLE /g)||[]).length,12);
+  assert.equal((BASELINE_SQL.match(/CREATE SEQUENCE /g)||[]).length,11);
+  assert.equal((BASELINE_SQL.match(/ADD CONSTRAINT /g)||[]).length,30);
+  for(const table of expected.tables) {
+    const start=BASELINE_SQL.indexOf(`CREATE TABLE "${table.schema}"."${table.name}" (`);
+    assert.ok(start>=0);
+    const block=BASELINE_SQL.slice(start,BASELINE_SQL.indexOf('\n);',start));
+    for(const c of expected.columns.filter(c=>c.table_name===table.name)) {
+      assert.ok(block.includes(`"${c.name}" ${c.type}${c.default_expression===null?'':' DEFAULT '+c.default_expression}${c.not_null?' NOT NULL':''}`),`${table.name}.${c.name}`);
+    }
+  }
+  for(const c of expected.constraints) assert.ok(BASELINE_SQL.includes(`ADD CONSTRAINT "${c.name}" ${c.definition};`),c.name);
+  for(const i of expected.indexes.filter(i=>!i.constraint_name)) assert.ok(BASELINE_SQL.includes(i.definition+';'),i.name);
+  for(const s of expected.sequences) {
+    assert.ok(BASELINE_SQL.includes(`CREATE SEQUENCE "${s.schema}"."${s.name}" AS ${s.type} INCREMENT BY ${s.increment} MINVALUE ${s.min} MAXVALUE ${s.max} START WITH ${s.start} CACHE ${s.cache} ${s.cycle?'CYCLE':'NO CYCLE'};`));
+    if(s.owner_table) assert.ok(BASELINE_SQL.includes(`ALTER SEQUENCE "${s.schema}"."${s.name}" OWNED BY "${s.owner_schema}"."${s.owner_table}"."${s.owner_column}";`));
+  }
+  assert.doesNotMatch(BASELINE_SQL,/\b(DROP|TRUNCATE|INSERT|UPDATE|SETVAL|RESTART)\b/i);
+  assert.doesNotMatch(BASELINE_SQL,/IF NOT EXISTS/i);
+  assert.doesNotMatch(BASELINE_SQL.replace(/DEFAULT nextval\('[^']+'::regclass\)/g,''),/\bnextval\s*\(/i);
+  const firstFk=BASELINE_SQL.indexOf('FOREIGN KEY');
+  assert.ok(firstFk>BASELINE_SQL.lastIndexOf('CREATE TABLE '));
+});
+
+for(const command of ['check','status']) {
+  test(`${command} uses enforced read-only inspection and never loads the runner`,async()=>{
+    const client=catalogClient(expected);
+    const report=await executeDatabaseCommand({command},config,expected,[BASELINE],{
+      makeClient:()=>client,getRunner:()=>assert.fail('Runner must never load'),log:()=>{},
+    });
+    assert.equal(report.state,'matching-unbaselined');
+    assert.deepEqual(report.applied,[]);
+    assert.ok(client.queries.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+    assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')||['BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY','COMMIT'].includes(sql)));
+  });
+  test(`${command} reports drift and fails without repairs`,async()=>{
+    const actual=clone();actual.columns.pop();
+    let report;
+    await assert.rejects(executeDatabaseCommand({command},config,expected,[BASELINE],{
+      makeClient:()=>catalogClient(actual),getRunner:()=>assert.fail('Runner must never load'),log:s=>{report=JSON.parse(s);},
+    }),/Schema drift detected/);
+    assert.ok(report.differences.length>0);
+  });
+}
+
+test('absent migration history requires no bookkeeping SELECT or writes',async()=>{
+  const client=catalogClient(expected);
+  assert.deepEqual(await readHistory(client),[]);
+  assert.equal(client.queries.length,1);
+});
+
+test('malformed migration history fails before runner could repair it',async()=>{
+  await assert.rejects(readHistory({query:async()=>({rows:[{relkind:'v'}]})}),/Unexpected migration history relation/);
+});
+
+test('CLI rejects unsafe runner flags and requires an exact write target',async()=>{
+  assert.deepEqual(parseArguments(['create','add-example']),{command:'create',name:'add-example'});
+  assert.deepEqual(parseArguments(['up','--database','pos_store']),{command:'up',database:'pos_store'});
+  for(const args of [['up'],['up','--fake'],['status','--fake'],['create','../escape'],['down','--database','pos_store','--count','2']]) {
+    assert.throws(()=>parseArguments(args));
+  }
+  await assert.rejects(executeDatabaseCommand({command:'up',database:'wrong'},config,expected,[BASELINE],{
+    makeClient:()=>assert.fail('Should not connect'),
+  }),/exactly match/);
+  assert.match(config.options,/default_transaction_read_only=on/);
+  assert.throws(()=>connectionConfig({},true),/Missing DB_HOST/);
+});
+
+test('only expected migration files are discovered',async()=>{
+  assert.deepEqual(await migrationNames(),[BASELINE]);
+});

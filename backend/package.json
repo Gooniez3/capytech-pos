@@ -5,7 +5,14 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "migrate:up": "node scripts/migrate.mjs up",
+    "migrate:down": "node scripts/migrate.mjs down",
+    "migrate:create": "node scripts/migrate.mjs create",
+    "migrate:baseline": "node scripts/migrate.mjs baseline",
+    "migrate:check": "node scripts/migrate.mjs check",
+    "migrate:status": "node scripts/migrate.mjs status",
+    "test:migrations": "node --test scripts/migrate.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
@@ -17,6 +24,7 @@
     "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.2.0",
+    "node-pg-migrate": "9.0.0",
     "pg": "^8.12.0",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.3"

@@ -1,29 +1,43 @@
 # POS Backend — Setup Guide
 
 ## What you need installed on the store PC (all free)
-1. **Node.js** (v18+) — https://nodejs.org
+1. **Node.js** (v24 recommended and validated for migration tooling) — https://nodejs.org
 2. **PostgreSQL** (v14+) — https://www.postgresql.org/download/
 
 ## Setup steps
 
-### 1. Create the database
-Open a terminal (or pgAdmin) and run:
-```
-createdb pos_store
-psql -d pos_store -f src/db/schema.sql
-```
-
-### 2. Install dependencies
-```
-cd backend
-npm install
+### 1. Install dependencies
+Open PowerShell in `backend` and run:
+```powershell
+npm ci
 ```
 
-### 3. Configure environment
-Copy `.env.example` to `.env` and fill in your actual PostgreSQL password:
+### 2. Configure the database connection
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
-cp .env.example .env
+Fill in `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in `.env`.
+Use the existing database settings for an installed store. For a fresh installation,
+provision a new empty PostgreSQL database first and set `DB_NAME` accordingly.
+
+### 3. Check the schema and use migrations
+```powershell
+npm run migrate:status
+npm run migrate:check
 ```
+These commands are read-only. They do not create migration bookkeeping or change
+application data. Do not run `src/db/schema.sql` or the historical ad-hoc schema
+scripts against an installed store.
+
+Follow [the migration guide](migrations/README.md) for the separate workflows:
+
+- **Existing customer database:** validate and review before explicitly registering
+  the baseline. Do not apply the fresh baseline to an existing schema.
+- **Brand-new empty database:** initialize using the baseline migration after
+  confirming the target database.
+
+Migration application and baseline registration are explicit operator actions;
+they never happen automatically at application startup or dependency installation.
 
 ### 4. Create your first admin user
 Since passwords must be hashed, run this once in a `node` console (inside the `backend` folder):
