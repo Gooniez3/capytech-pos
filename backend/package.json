@@ -14,6 +14,7 @@
     "migrate:status": "node scripts/migrate.mjs status",
     "test:migrations": "node --test scripts/migrate.test.mjs",
     "test:refund-void": "node --test src/services/sale-reversal.test.js",
+    "test:product-recycle-bin": "node --test src/services/product-recycle-bin.test.js",
     "test:checkout-idempotency": "node --test src/services/checkout-fingerprint.test.js"
   },
   "dependencies": {

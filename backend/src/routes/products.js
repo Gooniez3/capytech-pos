@@ -16,6 +16,12 @@ const {
   deleteProductImage,
 } = require('../services/productImageService');
 
+const {
+  ProductRecycleBinError,
+  revalidateCurrentProductAdmin,
+  assertProductCanBeRestored,
+} = require('../services/product-recycle-bin');
+
 const router = express.Router();
 
 /**
@@ -150,6 +156,46 @@ router.get('/', requireAuth, async (req, res) => {
     res.status(500).json({
       error: 'Server error',
     });
+  }
+});
+
+/**
+ * GET /api/products/deleted
+ *
+ * Admin recycle-bin view. Legacy inactive products with no deletion metadata
+ * remain visible and are explicitly marked for the UI.
+ */
+router.get('/deleted', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await revalidateCurrentProductAdmin(pool, req.user.id);
+
+    const result = await pool.query(
+      `
+        SELECT
+          p.id, p.sku, p.name, p.category_id, c.name AS category_name,
+          p.image_url, p.image_path, p.deleted_at, p.deleted_by,
+          u.username AS deleted_by_username,
+          COUNT(pv.id)::integer AS variant_count,
+          COUNT(pv.id) FILTER (WHERE pv.is_active = TRUE)::integer AS active_variant_count,
+          COUNT(pv.id) FILTER (WHERE pv.is_active = FALSE)::integer AS inactive_variant_count,
+          (p.deleted_at IS NULL AND p.deleted_by IS NULL) AS is_legacy_deleted
+        FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN users u ON u.id = p.deleted_by
+        LEFT JOIN product_variants pv ON pv.product_id = p.id
+        WHERE p.is_active = FALSE
+        GROUP BY p.id, c.name, u.username
+        ORDER BY p.deleted_at DESC NULLS LAST, p.id DESC
+      `
+    );
+
+    return res.json(result.rows);
+  } catch (err) {
+    if (err instanceof ProductRecycleBinError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error('Failed to load deleted products:', err);
+    return res.status(500).json({ error: 'Failed to load deleted products' });
   }
 });
 
@@ -931,6 +977,13 @@ router.put(
       const existingProduct =
         existingResult.rows[0];
 
+      if (!existingProduct.is_active) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Restore the product from the Recycle Bin before editing it',
+        });
+      }
+
       oldImagePath =
         existingProduct.image_path || null;
 
@@ -1541,6 +1594,93 @@ router.get(
    ========================================================= */
 
 /**
+ * POST /api/products/:id/restore
+ *
+ * Restores only the parent product. Child variant activation states are never
+ * changed, so independently inactive variants stay inactive.
+ */
+router.post('/:id/restore', requireAuth, requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await revalidateCurrentProductAdmin(client, req.user.id, { lock: true });
+
+    const productResult = await client.query(
+      `
+        SELECT id, sku, name, is_active, deleted_at, deleted_by
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [req.params.id]
+    );
+
+    if (productResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const product = productResult.rows[0];
+    if (product.is_active) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Product is already active' });
+    }
+
+    await assertProductCanBeRestored(client, product);
+
+    const restored = await client.query(
+      `
+        UPDATE products
+        SET is_active = TRUE, deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, name, sku, is_active, deleted_at, deleted_by, updated_at
+      `,
+      [product.id]
+    );
+
+    if (restored.rowCount !== 1) {
+      throw new ProductRecycleBinError('Product restoration could not be completed', 409);
+    }
+
+    await client.query(
+      `INSERT INTO audit_log (user_id, action, details)
+       VALUES ($1, 'RESTORE_PRODUCT', $2)`,
+      [req.user.id, `Restored product ${product.id} (${product.sku})`]
+    );
+
+    await client.query('COMMIT');
+    return res.json({
+      message: 'Product restored successfully.',
+      product: restored.rows[0],
+    });
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Ignore rollback failure.
+    }
+
+    if (err instanceof ProductRecycleBinError) {
+      return res.status(err.statusCode).json({
+        error: err.message,
+      });
+    }
+
+    if (err.code === '23505') {
+      return res.status(409).json({
+        error: 'Cannot restore product because its SKU conflicts with existing inventory',
+      });
+    }
+
+    console.error('Product restore failed:', err);
+    return res.status(500).json({ error: 'Failed to restore product' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
  * DELETE /api/products/:id
  *
  * Soft delete product.
@@ -1562,6 +1702,8 @@ router.delete(
     try {
       await client.query('BEGIN');
 
+      await revalidateCurrentProductAdmin(client, req.user.id, { lock: true });
+
       /*
        * Lock the product so two delete/update operations
        * cannot modify it at the same time.
@@ -1572,6 +1714,7 @@ router.delete(
             SELECT
               id,
               name,
+              sku,
               is_active
             FROM products
             WHERE id = $1
@@ -1616,6 +1759,8 @@ router.delete(
 
             SET
               is_active = FALSE,
+              deleted_at = NOW(),
+              deleted_by = $2,
               updated_at = NOW()
 
             WHERE id = $1
@@ -1625,10 +1770,22 @@ router.delete(
               name,
               sku,
               is_active,
+              deleted_at,
+              deleted_by,
               updated_at
           `,
-          [req.params.id]
+          [req.params.id, req.user.id]
         );
+
+      if (result.rowCount !== 1) {
+        throw new ProductRecycleBinError('Product deactivation could not be completed', 409);
+      }
+
+      await client.query(
+        `INSERT INTO audit_log (user_id, action, details)
+         VALUES ($1, 'DEACTIVATE_PRODUCT', $2)`,
+        [req.user.id, `Deactivated product ${product.id} (${product.sku})`]
+      );
 
       await client.query('COMMIT');
 
@@ -1641,6 +1798,10 @@ router.delete(
         await client.query('ROLLBACK');
       } catch {
         // Ignore rollback failure
+      }
+
+      if (err instanceof ProductRecycleBinError) {
+        return res.status(err.statusCode).json({ error: err.message });
       }
 
       console.error(

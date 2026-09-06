@@ -3,7 +3,9 @@ import api from '../../api/client';
 
 export default function ProductsTab() {
   const [products, setProducts] = useState([]);
+  const [deletedProducts, setDeletedProducts] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [qrPreview, setQrPreview] = useState(null);
   const [form, setForm] = useState({
@@ -20,12 +22,22 @@ export default function ProductsTab() {
 
   useEffect(() => {
     loadProducts();
+    loadDeletedProducts();
     loadCategories();
   }, []);
 
   const loadProducts = async () => {
     const res = await api.get('/products');
     setProducts(res.data);
+  };
+
+  const loadDeletedProducts = async () => {
+    const res = await api.get('/products/deleted');
+    setDeletedProducts(res.data);
+  };
+
+  const refreshProductLists = async () => {
+    await Promise.all([loadProducts(), loadDeletedProducts()]);
   };
 
   const loadCategories = async () => {
@@ -69,8 +81,36 @@ export default function ProductsTab() {
   };
 
   const viewQr = async (product) => {
-    const res = await api.get(`/products/${product.id}/qr`);
-    setQrPreview({ name: product.name, sku: res.data.sku, image: res.data.qr_code });
+    const res = await api.get(`/products/${product.id}/barcode`);
+    setQrPreview({ name: product.name, sku: res.data.sku, image: res.data.barcode });
+  };
+
+  const deleteProduct = async (product) => {
+    if (!window.confirm(
+      `Remove ${product.name} from active POS inventory? It can be restored from the Recycle Bin.`
+    )) return;
+
+    setError('');
+    try {
+      await api.delete(`/products/${product.id}`);
+      await refreshProductLists();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to remove product');
+    }
+  };
+
+  const restoreProduct = async (product) => {
+    if (!window.confirm(
+      `Restore ${product.name}? Any child variants that are still active will become sellable again.`
+    )) return;
+
+    setError('');
+    try {
+      await api.post(`/products/${product.id}/restore`);
+      await refreshProductLists();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to restore product');
+    }
   };
 
   return (
@@ -79,13 +119,25 @@ export default function ProductsTab() {
         <h2 className="font-semibold text-gray-700">
           Products ({products.length})
         </h2>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-blue-700"
-        >
-          {showForm ? 'Cancel' : '+ Add Product'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => { setShowRecycleBin(!showRecycleBin); loadDeletedProducts(); }}
+            className="border border-gray-300 text-gray-700 px-4 py-2 rounded text-sm font-medium hover:bg-gray-50"
+          >
+            {showRecycleBin ? 'Active Products' : `Recycle Bin (${deletedProducts.length})`}
+          </button>
+          <button
+            onClick={() => setShowForm(!showForm)}
+            className="bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-blue-700"
+          >
+            {showForm ? 'Cancel' : '+ Add Product'}
+          </button>
+        </div>
       </div>
+
+      {error && !showForm && (
+        <div className="bg-red-100 text-red-700 px-3 py-2 rounded text-sm">{error}</div>
+      )}
 
       {showForm && (
         <form
@@ -204,6 +256,7 @@ export default function ProductsTab() {
         </form>
       )}
 
+      {!showRecycleBin ? (
       <div className="bg-white rounded-lg shadow overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -213,6 +266,7 @@ export default function ProductsTab() {
               <th className="p-3">Price</th>
               <th className="p-3">Stock</th>
               <th className="p-3">QR</th>
+              <th className="p-3">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -230,11 +284,58 @@ export default function ProductsTab() {
                     View QR
                   </button>
                 </td>
+                <td className="p-3">
+                  <button
+                    onClick={() => deleteProduct(p)}
+                    className="text-red-600 underline text-xs"
+                  >
+                    Delete
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      ) : (
+        <div className="bg-white rounded-lg shadow overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500 border-b">
+                <th className="p-3">Product</th>
+                <th className="p-3">Deleted</th>
+                <th className="p-3">Variants</th>
+                <th className="p-3">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deletedProducts.map((p) => (
+                <tr key={p.id} className="border-b last:border-0">
+                  <td className="p-3">
+                    <div className="flex items-center gap-2">
+                      {p.image_url ? <img src={p.image_url} alt="" className="w-8 h-8 rounded object-cover" /> : <div className="w-8 h-8 rounded bg-gray-100" />}
+                      <div><div>{p.name}</div><div className="font-mono text-xs text-gray-500">{p.sku}</div></div>
+                    </div>
+                  </td>
+                  <td className="p-3 text-xs">
+                    <div>{p.deleted_at ? new Date(p.deleted_at).toLocaleString() : 'Unknown'}</div>
+                    <div className="text-gray-500">{p.deleted_by_username || 'Unknown'}</div>
+                  </td>
+                  <td className="p-3 text-xs">
+                    {p.variant_count} total / {p.active_variant_count} active / {p.inactive_variant_count} inactive
+                  </td>
+                  <td className="p-3">
+                    <button onClick={() => restoreProduct(p)} className="text-green-700 underline text-xs">Restore</button>
+                  </td>
+                </tr>
+              ))}
+              {deletedProducts.length === 0 && (
+                <tr><td className="p-4 text-gray-500" colSpan="4">Recycle Bin is empty.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {qrPreview && (
         <div

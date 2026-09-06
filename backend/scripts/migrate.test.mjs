@@ -21,10 +21,15 @@ import {
   up as p06Up, down as p06Down, UP_SQL as P06_UP_SQL, DOWN_SQL as P06_DOWN_SQL,
   CONSTRAINT_NAMES as P06_CONSTRAINT_NAMES,
 } from '../migrations/1788652800002_p06-checkout-request-fingerprint.mjs';
+import {
+  up as p08Up, down as p08Down, UP_SQL as P08_UP_SQL, DOWN_SQL as P08_DOWN_SQL,
+  CONSTRAINT_NAMES as P08_CONSTRAINT_NAMES,
+} from '../migrations/1788652800003_p08-product-recycle-bin.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06];
+const P08 = '1788652800003_p08-product-recycle-bin';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -161,9 +166,15 @@ test('installed node-pg-migrate loads all migrations deterministically without e
     await migrations[2].up(builder);
     return builder.getSql();
   };
+  const buildP08=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[3].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
   assert.equal(await buildP06(),await buildP06());
+  assert.equal(await buildP08(),await buildP08());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
 });
 
@@ -193,6 +204,40 @@ test('P0.6 queues deterministic up and down SQL without querying the test client
   assert.equal(build(p06Down),build(p06Down));
   assert.ok(build(p06Up).includes(P06_UP_SQL));
   assert.ok(build(p06Down).includes(P06_DOWN_SQL));
+  assert.deepEqual(client.queries,[]);
+});
+
+test('P0.8 adds product recycle-bin metadata without backfilling legacy inactive products',()=>{
+  assert.deepEqual(P08_CONSTRAINT_NAMES,[
+    'products_deleted_by_requires_deleted_at_chk',
+    'products_active_deletion_metadata_clear_chk',
+  ]);
+  assert.match(P08_UP_SQL,/ADD COLUMN deleted_at timestamptz/);
+  assert.match(P08_UP_SQL,/ADD COLUMN deleted_by integer/);
+  assert.match(P08_UP_SQL,/CONSTRAINT products_deleted_by_fkey\s+FOREIGN KEY \(deleted_by\) REFERENCES public\.users\(id\) ON DELETE SET NULL/);
+  assert.match(P08_UP_SQL,/CHECK \(deleted_by IS NULL OR deleted_at IS NOT NULL\)/);
+  assert.match(P08_UP_SQL,/CHECK \(NOT is_active OR \(deleted_at IS NULL AND deleted_by IS NULL\)\)/);
+  assert.match(P08_UP_SQL,/CREATE INDEX idx_products_recycle_bin[\s\S]*WHERE is_active = FALSE/);
+  assert.doesNotMatch(P08_UP_SQL,/\b(INSERT|UPDATE|TRUNCATE|SETVAL|NEXTVAL|RESTART)\b/i);
+  assert.match(P08_DOWN_SQL,/DROP INDEX public\.idx_products_recycle_bin/);
+  assert.match(P08_DOWN_SQL,/DROP CONSTRAINT products_active_deletion_metadata_clear_chk/);
+  assert.match(P08_DOWN_SQL,/DROP CONSTRAINT products_deleted_by_requires_deleted_at_chk/);
+  assert.match(P08_DOWN_SQL,/DROP CONSTRAINT products_deleted_by_fkey/);
+  assert.match(P08_DOWN_SQL,/DROP COLUMN deleted_by/);
+  assert.match(P08_DOWN_SQL,/DROP COLUMN deleted_at/);
+});
+
+test('P0.8 queues deterministic up and down SQL without querying the test client',()=>{
+  const client=catalogClient(empty());
+  const build=(migration)=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    migration(builder);
+    return builder.getSql();
+  };
+  assert.equal(build(p08Up),build(p08Up));
+  assert.equal(build(p08Down),build(p08Down));
+  assert.ok(build(p08Up).includes(P08_UP_SQL));
+  assert.ok(build(p08Down).includes(P08_DOWN_SQL));
   assert.deepEqual(client.queries,[]);
 });
 
