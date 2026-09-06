@@ -197,7 +197,7 @@ test('checkout route retains advisory locking and atomic fingerprint storage', a
   const source = await readFile(join(__dirname, '..', 'routes', 'sales.js'), 'utf8');
   assert.match(source, /SELECT pg_advisory_xact_lock\(/);
   assert.match(source, /hashtextextended\(\$1, 0\)/);
-  assert.match(source, /normalizeRequiredIdempotencyKey\(idempotency_key\)/);
+  assert.match(source, /validateCheckoutRequest\(req\.body\)/);
   assert.match(source, /idempotency_key,\s*checkout_request_fingerprint/);
   assert.match(source, /idempotencyKey,\s*checkoutFingerprint/);
   assert.ok(source.indexOf('pg_advisory_xact_lock') < source.indexOf('const duplicateCheckout'));
@@ -331,4 +331,202 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
   assert.equal(queries.filter(entry => entry.sql.includes('UPDATE products')).length, 1);
   assert.equal(queries.filter(entry => entry.sql.includes('INSERT INTO sales')).length, 1);
   assert.equal(released, true);
+});
+
+test('duplicate checkout targets create one decrement and one sale item', async () => {
+  const key = '223e4567-e89b-42d3-a456-426614174000';
+  const queries = [];
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values });
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+      if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+        return { rows: [{
+          id: 12, name: 'Mouse', sku: 'MOUSE', price: '10.25', cost: '5.00',
+          stock_quantity: 10, low_stock_threshold: 2,
+        }] };
+      }
+      if (sql.includes('COUNT(*)::integer AS count')) return { rows: [{ count: 0 }] };
+      if (sql.includes('UPDATE products')) return { rowCount: 1, rows: [{ stock_quantity: 7 }] };
+      if (sql.includes('nextval(')) return { rows: [{ invoice_number: '2' }] };
+      if (sql.includes('INSERT INTO sales')) return { rows: [{ id: 52, invoice_number: 'INV-000002' }] };
+      if (sql.includes('INSERT INTO sale_items')) return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    release() {},
+  };
+
+  await withMockPool({
+    query: async () => ({ rows: [] }),
+    connect: async () => client,
+  }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()({
+      user: { id: 7 },
+      body: {
+        idempotency_key: key,
+        payment_method: 'cash',
+        items: [
+          { product_id: 12, quantity: 1, price: 1 },
+          { product_id: '12', quantity: '2', total: 1 },
+        ],
+        subtotal: 1,
+        total: 1,
+      },
+    }, response);
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.body.items.length, 1);
+    assert.equal(response.body.items[0].quantity, 3);
+    assert.equal(response.body.items[0].unit_price, '10.25');
+    assert.equal(response.body.items[0].line_total, '30.75');
+  });
+
+  const stockUpdates = queries.filter(entry => entry.sql.includes('UPDATE products'));
+  const itemInserts = queries.filter(entry => entry.sql.includes('INSERT INTO sale_items'));
+  assert.equal(stockUpdates.length, 1);
+  assert.deepEqual(stockUpdates[0].values, [3, 12]);
+  assert.equal(itemInserts.length, 1);
+  assert.equal(itemInserts[0].values[6], 3);
+});
+
+test('all inventory targets validate before the first stock update', async () => {
+  const key = '323e4567-e89b-42d3-a456-426614174000';
+  const queries = [];
+  let productLookup = 0;
+  const client = {
+    async query(sql) {
+      queries.push(sql);
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+      if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+        productLookup += 1;
+        return productLookup === 1
+          ? { rows: [{ id: 12, name: 'Mouse', sku: 'MOUSE', price: '10.00', cost: '5.00', stock_quantity: 10 }] }
+          : { rows: [] };
+      }
+      if (sql.includes('COUNT(*)::integer AS count')) return { rows: [{ count: 0 }] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    release() {},
+  };
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()({
+      user: { id: 7 },
+      body: {
+        idempotency_key: key,
+        payment_method: 'cash',
+        items: [{ product_id: 12, quantity: 1 }, { product_id: 13, quantity: 1 }],
+      },
+    }, response);
+    assert.equal(response.statusCode, 400);
+  });
+
+  assert.equal(queries.some(sql => sql.includes('UPDATE products')), false);
+  assert.equal(queries.some(sql => sql.includes('INSERT INTO sales')), false);
+});
+
+test('variant-parent mismatch and insufficient stock fail without mutation', async () => {
+  for (const variantRows of [[], [{
+    variant_id: 9, product_id: 12, product_name: 'Mouse', variant_name: 'Black',
+    variant_sku: 'MOUSE-BLACK', price: '10.00', cost: '5.00', stock_quantity: 1,
+  }]]) {
+    const queries = [];
+    const client = {
+      async query(sql) {
+        queries.push(sql);
+        if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+        if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+        if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+        if (sql.includes('FROM product_variants pv')) return { rows: variantRows };
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+      release() {},
+    };
+    await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+      const response = responseRecorder();
+      await checkoutHandler()({
+        user: { id: 7 },
+        body: {
+          idempotency_key: '423e4567-e89b-42d3-a456-426614174000',
+          payment_method: 'cash',
+          items: [{ product_id: 12, variant_id: 9, quantity: 2 }],
+        },
+      }, response);
+      assert.equal(response.statusCode, 400);
+    });
+    assert.equal(queries.some(sql => sql.includes('UPDATE product_variants')), false);
+  }
+});
+
+test('invalid payment is rejected before lookup and does not consume a sale', async () => {
+  let databaseCalls = 0;
+  const failIfCalled = async () => {
+    databaseCalls += 1;
+    throw new Error('Database must not be called');
+  };
+
+  await withMockPool({ query: failIfCalled, connect: failIfCalled }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()({
+      user: { id: 7 },
+      body: {
+        idempotency_key: '523e4567-e89b-42d3-a456-426614174000',
+        payment_method: 'card',
+        items: [{ product_id: 12, quantity: 1 }],
+      },
+    }, response);
+    assert.equal(response.statusCode, 400);
+  });
+  assert.equal(databaseCalls, 0);
+});
+
+test('discount above authoritative subtotal fails before stock mutation', async () => {
+  const queries = [];
+  const client = {
+    async query(sql) {
+      queries.push(sql);
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+      if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: 12, name: 'Mouse', sku: 'MOUSE', price: '10.00', cost: '5.00', stock_quantity: 10 }] };
+      }
+      if (sql.includes('COUNT(*)::integer AS count')) return { rows: [{ count: 0 }] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    release() {},
+  };
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()({
+      user: { id: 7 },
+      body: {
+        idempotency_key: '623e4567-e89b-42d3-a456-426614174000',
+        payment_method: 'cash',
+        discount: '10.01',
+        items: [{ product_id: 12, quantity: 1 }],
+      },
+    }, response);
+    assert.equal(response.statusCode, 400);
+    assert.match(response.body.error, /exceed subtotal/);
+  });
+  assert.equal(queries.some(sql => sql.includes('UPDATE products')), false);
+});
+
+test('pool connection failure returns a generic 500 without internal details', async () => {
+  await withMockPool({
+    query: async () => ({ rows: [] }),
+    connect: async () => { throw new Error('secret database hostname'); },
+  }, async () => {
+    const response = responseRecorder();
+    await checkoutHandler()({ body: validCheckoutBody('723e4567-e89b-42d3-a456-426614174000'), user: { id: 7 } }, response);
+    assert.equal(response.statusCode, 500);
+    assert.deepEqual(response.body, { error: 'Checkout failed' });
+  });
 });

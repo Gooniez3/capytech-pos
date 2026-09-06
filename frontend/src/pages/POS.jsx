@@ -6,6 +6,13 @@ import {
   clearCheckoutKey,
   getOrCreateCheckoutKey,
 } from '../utils/checkoutIdempotency';
+import {
+  addProductToCart,
+  cartCheckoutItems,
+  changeCartQuantity,
+  inventoryTargetKey,
+  removeCartTarget,
+} from '../utils/posCart';
 
 export default function POS() {
   const [products, setProducts] = useState([]);
@@ -34,33 +41,15 @@ export default function POS() {
   };
 
   const addToCart = (product) => {
-    setCart((prev) => {
-      const existing = prev.find((item) => item.product.id === product.id);
-      if (existing) {
-        return prev.map((item) =>
-          item.product.id === product.id
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
-        );
-      }
-      return [...prev, { product, quantity: 1 }];
-    });
+    setCart((prev) => addProductToCart(prev, product));
   };
 
-  const updateQuantity = (productId, delta) => {
-    setCart((prev) =>
-      prev
-        .map((item) =>
-          item.product.id === productId
-            ? { ...item, quantity: item.quantity + delta }
-            : item
-        )
-        .filter((item) => item.quantity > 0)
-    );
+  const updateQuantity = (product, delta) => {
+    setCart((prev) => changeCartQuantity(prev, product, delta));
   };
 
-  const removeFromCart = (productId) => {
-    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+  const removeFromCart = (product) => {
+    setCart((prev) => removeCartTarget(prev, product));
   };
 
   // Handles input from a USB barcode/QR scanner (which types the code + Enter)
@@ -91,10 +80,7 @@ export default function POS() {
     const checkoutKey = getOrCreateCheckoutKey(checkoutKeyRef);
     try {
       const res = await api.post('/sales', {
-        items: cart.map((item) => ({
-          product_id: item.product.id,
-          quantity: item.quantity,
-        })),
+        items: cartCheckoutItems(cart),
         payment_method: 'cash',
         idempotency_key: checkoutKey,
       });
@@ -187,7 +173,7 @@ export default function POS() {
             )}
             {cart.map((item) => (
               <div
-                key={item.product.id}
+                key={inventoryTargetKey(item.product)}
                 className="flex justify-between items-center border-b pb-2 text-sm"
               >
                 <div className="flex-1">
@@ -199,19 +185,19 @@ export default function POS() {
                 </div>
                 <div className="flex items-center gap-1">
                   <button
-                    onClick={() => updateQuantity(item.product.id, -1)}
+                    onClick={() => updateQuantity(item.product, -1)}
                     className="w-6 h-6 bg-gray-200 rounded"
                   >
                     -
                   </button>
                   <button
-                    onClick={() => updateQuantity(item.product.id, 1)}
+                    onClick={() => updateQuantity(item.product, 1)}
                     className="w-6 h-6 bg-gray-200 rounded"
                   >
                     +
                   </button>
                   <button
-                    onClick={() => removeFromCart(item.product.id)}
+                    onClick={() => removeFromCart(item.product)}
                     className="text-red-500 ml-1"
                   >
                     ✕

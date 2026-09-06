@@ -10,9 +10,16 @@ const {
 const {
   createCheckoutFingerprint,
   findExistingCheckout,
-  normalizePaymentMethod,
-  normalizeRequiredIdempotencyKey,
 } = require('../services/checkout-fingerprint');
+const {
+  CheckoutValidationError,
+  assertDiscountWithinSubtotal,
+  authoritativeDecimalToMinorUnits,
+  checkedLineTotal,
+  checkedSubtotal,
+  minorUnitsToDatabaseDecimal,
+  validateCheckoutRequest,
+} = require('../services/checkout-validation');
 
 const router = express.Router();
 
@@ -194,38 +201,28 @@ async function createRefundNotifications(
 }
 
 router.post('/', requireAuth, async (req, res) => {
-  const {
-  items,
-  payment_method,
-  discount,
-  customer_id,
-
-  customer_name,
-  customer_phone,
-  customer_email,
-  customer_address,
-
-  idempotency_key,
-} = req.body;
-
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({
-      error: 'Cart is empty',
-    });
-  }
-
-  let idempotencyKey;
+  let checkoutRequest;
 
   try {
-    idempotencyKey = normalizeRequiredIdempotencyKey(idempotency_key);
+    checkoutRequest = validateCheckoutRequest(req.body);
   } catch (err) {
     return res.status(err.statusCode || 400).json({
       error: err.message,
     });
   }
 
-  const paymentMethod =
-    normalizePaymentMethod(payment_method);
+  const {
+    items,
+    payment_method: paymentMethod,
+    discount,
+    discount_minor_units: discountMinorUnits,
+    customer_id,
+    customer_name,
+    customer_phone,
+    customer_email,
+    customer_address,
+    idempotency_key: idempotencyKey,
+  } = checkoutRequest;
 
   let checkoutFingerprint;
 
@@ -267,9 +264,10 @@ router.post('/', requireAuth, async (req, res) => {
     });
   }
 
-  const client = await pool.connect();
+  let client;
 
   try {
+  client = await pool.connect();
   await client.query('BEGIN');
 
   /*
@@ -333,31 +331,20 @@ router.post('/', requireAuth, async (req, res) => {
     if (
       customerResult.rows.length === 0
     ) {
-      throw new Error(
+      throw new CheckoutValidationError(
         'Customer not found'
       );
     }
 
-    customerId =
-      Number(customer_id);
+    customerId = customer_id;
   }
 
-  let subtotal = 0;
+  let subtotalMinorUnits = 0;
   const lineItems = [];
+  const inventoryMutations = [];
 
   for (const item of items) {
-  const quantity =
-    Number(item.quantity);
-
-  if (
-    !Number.isFinite(quantity) ||
-    !Number.isInteger(quantity) ||
-    quantity <= 0
-  ) {
-    throw new Error(
-      'Quantity must be a positive whole number'
-    );
-  }
+  const quantity = item.quantity;
 
  
       /*
@@ -416,7 +403,7 @@ p.name AS product_name
           variantResult.rows[0];
 
         if (!variant) {
-          throw new Error(
+          throw new CheckoutValidationError(
             `Variant ${item.variant_id} not found`
           );
         }
@@ -426,21 +413,21 @@ p.name AS product_name
             variant.stock_quantity
           ) < quantity
         ) {
-          throw new Error(
+          throw new CheckoutValidationError(
             `Not enough stock for ${variant.product_name} — ${variant.variant_name}`
           );
         }
 
-        const unitPrice =
-  Number(variant.price);
-
-const unitCost =
-  Number(variant.cost ?? 0);
-
-const lineTotal =
-  unitPrice * quantity;
-
-        subtotal += lineTotal;
+        const unitPriceMinorUnits = authoritativeDecimalToMinorUnits(
+          variant.price,
+          'variant price'
+        );
+        const unitCostMinorUnits = authoritativeDecimalToMinorUnits(
+          variant.cost ?? '0',
+          'variant cost'
+        );
+        const lineTotalMinorUnits = checkedLineTotal(unitPriceMinorUnits, quantity);
+        subtotalMinorUnits = checkedSubtotal(subtotalMinorUnits, lineTotalMinorUnits);
 
         lineItems.push({
           product_id:
@@ -459,74 +446,20 @@ const lineTotal =
             variant.variant_sku,
 
           quantity,
-          unit_cost:
-          unitCost,
-
-          unit_price:
-            unitPrice,
-
-          line_total:
-            lineTotal,
+          unit_cost: minorUnitsToDatabaseDecimal(unitCostMinorUnits),
+          unit_price: minorUnitsToDatabaseDecimal(unitPriceMinorUnits),
+          line_total: minorUnitsToDatabaseDecimal(lineTotalMinorUnits),
         });
 
-        const updatedVariantResult =
-  await client.query(
-    `
-      UPDATE product_variants
-
-      SET
-        stock_quantity =
-          stock_quantity - $1,
-
-        updated_at = NOW()
-
-      WHERE id = $2
-
-      RETURNING
-        stock_quantity,
-        low_stock_threshold
-    `,
-    [
-      quantity,
-      variant.variant_id,
-    ]
-  );
-
-const updatedVariant =
-  updatedVariantResult.rows[0];
-
-const previousVariantStock =
-  Number(variant.stock_quantity);
-
-const newVariantStock =
-  Number(updatedVariant.stock_quantity);
-
-const variantThreshold =
-  Number(
-    updatedVariant.low_stock_threshold ?? 2
-  );
-
-if (
-  previousVariantStock > variantThreshold &&
-  newVariantStock <= variantThreshold
-) {
-  await createLowStockNotifications(
-    client,
-    {
-      productName:
-        variant.product_name,
-
-      variantName:
-        variant.variant_name,
-
-      stockQuantity:
-        newVariantStock,
-
-      threshold:
-        variantThreshold,
-    }
-  );
-}
+        inventoryMutations.push({
+          table: 'product_variants',
+          id: variant.variant_id,
+          quantity,
+          previousStock: Number(variant.stock_quantity),
+          threshold: Number(variant.low_stock_threshold ?? 2),
+          productName: variant.product_name,
+          variantName: variant.variant_name,
+        });
 
 continue;
       }
@@ -563,7 +496,7 @@ continue;
         productResult.rows[0];
 
       if (!product) {
-        throw new Error(
+        throw new CheckoutValidationError(
           `Product ${item.product_id} not found`
         );
       }
@@ -590,7 +523,7 @@ continue;
           variantCountResult.rows[0].count
         ) > 0
       ) {
-        throw new Error(
+        throw new CheckoutValidationError(
           `${product.name} requires a variant selection`
         );
       }
@@ -600,21 +533,21 @@ continue;
           product.stock_quantity
         ) < quantity
       ) {
-        throw new Error(
+        throw new CheckoutValidationError(
           `Not enough stock for ${product.name}`
         );
       }
 
-      const unitPrice =
-  Number(product.price);
-
-const unitCost =
-  Number(product.cost ?? 0);
-
-const lineTotal =
-  unitPrice * quantity;
-
-      subtotal += lineTotal;
+      const unitPriceMinorUnits = authoritativeDecimalToMinorUnits(
+        product.price,
+        'product price'
+      );
+      const unitCostMinorUnits = authoritativeDecimalToMinorUnits(
+        product.cost ?? '0',
+        'product cost'
+      );
+      const lineTotalMinorUnits = checkedLineTotal(unitPriceMinorUnits, quantity);
+      subtotalMinorUnits = checkedSubtotal(subtotalMinorUnits, lineTotalMinorUnits);
 
       lineItems.push({
         product_id:
@@ -631,73 +564,20 @@ const lineTotal =
 
         quantity,
 
-        unit_cost:
-          unitCost,
-
-        unit_price:
-          unitPrice,
-
-        line_total:
-          lineTotal,
+        unit_cost: minorUnitsToDatabaseDecimal(unitCostMinorUnits),
+        unit_price: minorUnitsToDatabaseDecimal(unitPriceMinorUnits),
+        line_total: minorUnitsToDatabaseDecimal(lineTotalMinorUnits),
       });
 
-      const updatedProductResult =
-  await client.query(
-    `
-      UPDATE products
-
-      SET
-        stock_quantity =
-          stock_quantity - $1,
-
-        updated_at = NOW()
-
-      WHERE id = $2
-
-      RETURNING
-        stock_quantity,
-        low_stock_threshold
-    `,
-    [
-      quantity,
-      product.id,
-    ]
-  );
-
-const updatedProduct =
-  updatedProductResult.rows[0];
-
-const previousProductStock =
-  Number(product.stock_quantity);
-
-const newProductStock =
-  Number(updatedProduct.stock_quantity);
-
-const productThreshold =
-  Number(
-    updatedProduct.low_stock_threshold ?? 5
-  );
-
-if (
-  previousProductStock > productThreshold &&
-  newProductStock <= productThreshold
-) {
-  await createLowStockNotifications(
-    client,
-    {
-      productName:
-        product.name,
-
-      variantName: null,
-
-      stockQuantity:
-        newProductStock,
-
-      threshold:
-        productThreshold,
-    }
-  );
-}
+      inventoryMutations.push({
+        table: 'products',
+        id: product.id,
+        quantity,
+        previousStock: Number(product.stock_quantity),
+        threshold: Number(product.low_stock_threshold ?? 5),
+        productName: product.name,
+        variantName: null,
+      });
   }
 
     /*
@@ -706,20 +586,39 @@ if (
      * =====================================================
      */
 
-    const discountAmount =
-      Math.max(
-        0,
-        Number(discount) || 0
+    assertDiscountWithinSubtotal(discountMinorUnits, subtotalMinorUnits);
+
+    const totalMinorUnits = subtotalMinorUnits - discountMinorUnits;
+    const subtotal = minorUnitsToDatabaseDecimal(subtotalMinorUnits);
+    const discountAmount = minorUnitsToDatabaseDecimal(discountMinorUnits);
+    const total = minorUnitsToDatabaseDecimal(totalMinorUnits);
+
+    /* All inventory and monetary validation is complete before this point. */
+    for (const mutation of inventoryMutations) {
+      const updatedResult = await client.query(
+        `
+          UPDATE ${mutation.table}
+          SET stock_quantity = stock_quantity - $1, updated_at = NOW()
+          WHERE id = $2
+          RETURNING stock_quantity
+        `,
+        [mutation.quantity, mutation.id]
       );
 
-    if (discountAmount > subtotal) {
-      throw new Error(
-        'Discount cannot exceed subtotal'
-      );
+      if (updatedResult.rowCount !== 1) {
+        throw new CheckoutValidationError('Inventory changed before checkout could complete');
+      }
+
+      const newStock = Number(updatedResult.rows[0].stock_quantity);
+      if (mutation.previousStock > mutation.threshold && newStock <= mutation.threshold) {
+        await createLowStockNotifications(client, {
+          productName: mutation.productName,
+          variantName: mutation.variantName,
+          stockQuantity: newStock,
+          threshold: mutation.threshold,
+        });
+      }
     }
-
-    const total =
-      subtotal - discountAmount;
 
     const invoiceNumber =
       await generateInvoiceNumber(
@@ -844,19 +743,18 @@ const customerAddress =
       items: lineItems,
     });
   } catch (err) {
-    await client.query(
-      'ROLLBACK'
-    );
+    if (client) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
 
-    console.error(err);
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
 
-    res.status(err.statusCode || 400).json({
-      error:
-        err.message ||
-        'Checkout failed',
-    });
+    console.error('Checkout failed:', err);
+    return res.status(500).json({ error: 'Checkout failed' });
   } finally {
-    client.release();
+    client?.release();
   }
 });
 
