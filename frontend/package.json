@@ -9,7 +9,9 @@
     "preview": "vite preview --host",
     "test:checkout-idempotency": "node --test src/utils/checkoutIdempotency.test.js",
     "test:pos-cart": "node --test src/utils/posCart.test.js",
-    "test:pos-checkout": "node --test src/utils/posCheckout.test.js"
+    "test:pos-checkout": "node --test src/utils/posCheckout.test.js",
+    "test:pos-catalog": "node --test src/utils/posCatalog.test.js",
+    "test:pos-receipt": "node --test src/utils/posReceipt.test.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

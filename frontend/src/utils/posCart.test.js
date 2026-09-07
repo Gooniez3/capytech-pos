@@ -37,4 +37,5 @@ test('POS retains cash checkout and uses normalized cart payload', async () => {
   assert.match(source, /items: cartCheckoutItems\(cart\)/);
   assert.match(source, /checkoutRequestBody\(/);
   assert.match(source, /paymentMethod/);
+  assert.match(source, /discount: parsedDiscount\.canonical/);
 });

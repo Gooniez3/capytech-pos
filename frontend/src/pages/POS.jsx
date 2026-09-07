@@ -17,7 +17,17 @@ import {
   DEFAULT_PAYMENT_METHOD,
   PAYMENT_METHODS,
   checkoutRequestBody,
+  parseCheckoutDiscount,
 } from '../utils/posCheckout';
+import {
+  cartProductFromLookup,
+  cartProductFromVariant,
+  catalogItemKey,
+  filterProducts,
+  needsVariantSelection,
+  productFromSearchRow,
+} from '../utils/posCatalog';
+import { invoiceFromCheckout, printReceipt } from '../utils/posReceipt';
 
 export default function POS() {
   const [products, setProducts] = useState([]);
@@ -30,6 +40,11 @@ export default function POS() {
   const [customerResults, setCustomerResults] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [customerPickerOpen, setCustomerPickerOpen] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [variantPicker, setVariantPicker] = useState(null);
+  const [discountInput, setDiscountInput] = useState('');
+  const [lastInvoice, setLastInvoice] = useState(null);
   const scanRef = useRef(null);
   const checkoutKeyRef = useRef(null);
   const { user, logout } = useAuth();
@@ -59,6 +74,26 @@ export default function POS() {
     return () => clearTimeout(handle);
   }, [customerQuery, customerPickerOpen, selectedCustomer]);
 
+  useEffect(() => {
+    const query = productQuery.trim();
+    if (!query) {
+      setSearchResults(null);
+      return undefined;
+    }
+
+    const handle = setTimeout(async () => {
+      try {
+        const res = await api.get('/products/search', { params: { q: query } });
+        setSearchResults(res.data.map(productFromSearchRow));
+      } catch (err) {
+        console.error(err);
+        setSearchResults(filterProducts(products, query));
+      }
+    }, 200);
+
+    return () => clearTimeout(handle);
+  }, [productQuery, products]);
+
   const loadProducts = async () => {
     try {
       const res = await api.get('/products');
@@ -70,6 +105,30 @@ export default function POS() {
 
   const addToCart = (product) => {
     setCart((prev) => addProductToCart(prev, product));
+  };
+
+  const openVariantPicker = async (product) => {
+    const productId = product.product_id ?? product.id;
+    try {
+      const res = await api.get(`/products/${productId}/variants`);
+      if (!res.data.length) {
+        setMessage('This product requires a variant');
+        setTimeout(() => setMessage(''), 2000);
+        return;
+      }
+      setVariantPicker({ parent: product, variants: res.data });
+    } catch (err) {
+      setMessage(err.response?.data?.error || 'Failed to load variants');
+      setTimeout(() => setMessage(''), 2000);
+    }
+  };
+
+  const handleProductClick = async (product) => {
+    if (needsVariantSelection(product, products)) {
+      await openVariantPicker(product);
+      return;
+    }
+    addToCart(product);
   };
 
   const updateQuantity = (product, delta) => {
@@ -88,8 +147,14 @@ export default function POS() {
 
     try {
       const res = await api.get(`/products/lookup/${scanInput.trim()}`);
-      addToCart(res.data);
-      setMessage(`Added: ${res.data.name}`);
+      const scanned = cartProductFromLookup(res.data);
+      if (needsVariantSelection(scanned, products)) {
+        await openVariantPicker(scanned);
+        setMessage(`Select a variant for ${scanned.name}`);
+      } else {
+        addToCart(scanned);
+        setMessage(`Added: ${scanned.name}`);
+      }
     } catch (err) {
       setMessage('Product not found for that code');
     }
@@ -102,8 +167,19 @@ export default function POS() {
     0
   );
 
+  const catalog = searchResults ?? filterProducts(products, productQuery);
+  const parsedDiscount = parseCheckoutDiscount(discountInput);
+  const discountAmount = parsedDiscount.error ? 0 : parsedDiscount.amount;
+  const discountTooLarge = !parsedDiscount.error && discountAmount > subtotal;
+  const checkoutBlocked =
+    cart.length === 0 ||
+    checkingOut ||
+    Boolean(parsedDiscount.error) ||
+    discountTooLarge;
+  const total = Math.max(0, subtotal - discountAmount);
+
   const handleCheckout = async () => {
-    if (cart.length === 0) return;
+    if (checkoutBlocked) return;
     setCheckingOut(true);
     const checkoutKey = getOrCreateCheckoutKey(checkoutKeyRef);
     try {
@@ -111,20 +187,22 @@ export default function POS() {
         items: cartCheckoutItems(cart),
         paymentMethod,
         customer: selectedCustomer,
+        discount: parsedDiscount.canonical,
         idempotencyKey: checkoutKey,
       }));
 
       clearCheckoutKey(checkoutKeyRef);
+      const invoice = invoiceFromCheckout(res.data);
+      setLastInvoice(invoice);
+      printReceipt(invoice);
       setMessage(`Sale complete! Invoice ${res.data.sale.invoice_number}`);
       setCart([]);
       setSelectedCustomer(null);
       setCustomerQuery('');
       setCustomerResults([]);
       setCustomerPickerOpen(false);
+      setDiscountInput('');
       loadProducts(); // refresh stock counts
-
-      // TODO: this is where we'll trigger the thermal printer receipt
-      // once printer integration is added (Step 3).
     } catch (err) {
       setMessage(err.response?.data?.error || 'Checkout failed');
     } finally {
@@ -174,18 +252,30 @@ export default function POS() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Product grid */}
         <div className="md:col-span-2 bg-white rounded-lg shadow p-4">
-          <h2 className="font-semibold mb-3 text-gray-700">Products</h2>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h2 className="font-semibold text-gray-700">Products</h2>
+            <input
+              type="text"
+              value={productQuery}
+              onChange={(e) => setProductQuery(e.target.value)}
+              placeholder="Search name or SKU"
+              className="w-56 max-w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {products.map((product) => (
+            {catalog.map((product) => (
               <button
-                key={product.id}
-                onClick={() => addToCart(product)}
+                key={catalogItemKey(product)}
+                onClick={() => handleProductClick(product)}
                 disabled={product.stock_quantity <= 0}
                 className="border rounded-lg p-3 text-left hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <div className="font-medium text-sm text-gray-800">
                   {product.name}
                 </div>
+                {product.has_variants && (
+                  <div className="text-xs text-amber-700">Choose variant</div>
+                )}
                 <div className="text-blue-600 font-semibold">
                   ₱{parseFloat(product.price).toFixed(2)}
                 </div>
@@ -194,6 +284,9 @@ export default function POS() {
                 </div>
               </button>
             ))}
+            {catalog.length === 0 && (
+              <p className="text-sm text-gray-400 col-span-full">No matching products</p>
+            )}
           </div>
         </div>
 
@@ -329,20 +422,94 @@ export default function POS() {
               </div>
             </div>
 
-            <div className="flex justify-between font-semibold text-lg">
-              <span>Total</span>
-              <span>₱{subtotal.toFixed(2)}</span>
+            <div>
+              <div className="text-sm font-medium text-gray-700 mb-1">Discount</div>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={discountInput}
+                onChange={(e) => setDiscountInput(e.target.value)}
+                placeholder="0.00"
+                className="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {(parsedDiscount.error || discountTooLarge) && (
+                <div className="text-xs text-red-600 mt-1">
+                  {parsedDiscount.error || 'Discount cannot exceed subtotal'}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1 text-sm">
+              <div className="flex justify-between text-gray-600">
+                <span>Subtotal</span>
+                <span>₱{subtotal.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-gray-600">
+                <span>Discount</span>
+                <span>₱{discountAmount.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between font-semibold text-lg">
+                <span>Total</span>
+                <span>₱{total.toFixed(2)}</span>
+              </div>
             </div>
             <button
               onClick={handleCheckout}
-              disabled={cart.length === 0 || checkingOut}
+              disabled={checkoutBlocked}
               className="w-full bg-green-600 text-white py-2 rounded font-medium hover:bg-green-700 disabled:opacity-50"
             >
               {checkingOut ? 'Processing...' : 'Checkout & Print'}
             </button>
+            {lastInvoice && (
+              <button
+                type="button"
+                onClick={() => printReceipt(lastInvoice)}
+                className="w-full border py-2 rounded text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Reprint last receipt
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {variantPicker && (
+        <div className="fixed inset-0 bg-black/40 z-20 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-4">
+            <div className="flex justify-between items-start mb-3">
+              <h3 className="font-semibold text-gray-800">
+                Select variant — {variantPicker.parent.name || variantPicker.parent.product_name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setVariantPicker(null)}
+                className="text-sm text-gray-500"
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {variantPicker.variants.map((variant) => (
+                <button
+                  key={variant.id}
+                  type="button"
+                  disabled={Number(variant.stock_quantity) <= 0}
+                  onClick={() => {
+                    addToCart(cartProductFromVariant(variantPicker.parent, variant));
+                    setVariantPicker(null);
+                  }}
+                  className="w-full text-left border rounded px-3 py-2 hover:bg-blue-50 disabled:opacity-40"
+                >
+                  <div className="font-medium text-sm">{variant.name}</div>
+                  <div className="text-xs text-gray-500">
+                    ₱{parseFloat(variant.effective_price ?? variant.price ?? 0).toFixed(2)} · Stock {variant.stock_quantity}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

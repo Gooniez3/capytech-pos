@@ -5,6 +5,7 @@ import {
   DEFAULT_PAYMENT_METHOD,
   PAYMENT_METHODS,
   checkoutRequestBody,
+  parseCheckoutDiscount,
 } from './posCheckout.js';
 
 test('default payment method is cash and all supported methods are listed', () => {
@@ -65,6 +66,17 @@ test('checkout payload sends selected customer_id and otherwise sends null', () 
   );
 });
 
+test('checkout payload sends a parsed discount and defaults to zero', () => {
+  const items = [{ product_id: 12, quantity: 1 }];
+  assert.equal(checkoutRequestBody({ items, idempotencyKey: 'key-1' }).discount, '0');
+  assert.equal(
+    checkoutRequestBody({ items, discount: '10.25', idempotencyKey: 'key-1' }).discount,
+    '10.25'
+  );
+  assert.equal(parseCheckoutDiscount('').canonical, '0');
+  assert.equal(parseCheckoutDiscount('1.234').error, 'Discount must have at most two decimal places');
+});
+
 test('POS selects payment and customer and sends them during checkout', async () => {
   const source = await readFile(new URL('../pages/POS.jsx', import.meta.url), 'utf8');
   assert.match(source, /useState\(DEFAULT_PAYMENT_METHOD\)/);
@@ -74,4 +86,7 @@ test('POS selects payment and customer and sends them during checkout', async ()
   assert.match(source, /selectedCustomer/);
   assert.match(source, /api\.get\('\/customers'/);
   assert.match(source, /setSelectedCustomer\(null\)/);
+  assert.match(source, /discountInput/);
+  assert.match(source, /printReceipt\(/);
+  assert.match(source, /needsVariantSelection/);
 });
