@@ -10,6 +10,7 @@ const {
   authoritativeDecimalToMinorUnits,
   checkedLineTotal,
   checkedSubtotal,
+  customerIdentityForFingerprint,
   minorUnitsToDatabaseDecimal,
   normalizeCheckoutIntent,
   normalizeDiscount,
@@ -17,6 +18,7 @@ const {
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,
   normalizeRequiredInteger,
+  resolveCheckoutCustomerSnapshot,
   validateCheckoutRequest,
 } = require('./checkout-validation');
 
@@ -170,4 +172,102 @@ test('UUID normalization uses one lowercase advisory-lock identity', () => {
   const lower = '123e4567-e89b-42d3-a456-426614174000';
   assert.equal(normalizeRequiredIdempotencyKey(lower.toUpperCase()), lower);
   assert.equal(normalizeRequiredIdempotencyKey(` ${lower} `), lower);
+});
+
+test('selected customer snapshot uses the database record', () => {
+  const intent = normalizeCheckoutIntent({
+    items: [{ product_id: 1, quantity: 1 }],
+    payment_method: 'cash',
+    customer_id: 5,
+    customer_name: 'Someone Else',
+    customer_phone: '000',
+    customer_email: 'other@example.com',
+    customer_address: 'Other Street',
+  });
+
+  assert.deepEqual(
+    resolveCheckoutCustomerSnapshot(intent, {
+      id: 5,
+      name: ' Ada Lovelace ',
+      phone: ' 091234 ',
+      email: ' ada@example.com ',
+      address: ' Main Street ',
+    }),
+    {
+      customer_id: 5,
+      customer_name: 'Ada Lovelace',
+      customer_phone: '091234',
+      customer_email: 'ada@example.com',
+      customer_address: 'Main Street',
+    }
+  );
+});
+
+test('client snapshot cannot override a selected customer in the fingerprint identity', () => {
+  const withSnapshot = normalizeCheckoutIntent({
+    items: [{ product_id: 1, quantity: 1 }],
+    payment_method: 'cash',
+    customer_id: 5,
+    customer_name: 'Someone Else',
+  });
+  const withoutSnapshot = normalizeCheckoutIntent({
+    items: [{ product_id: 1, quantity: 1 }],
+    payment_method: 'cash',
+    customer_id: 5,
+  });
+
+  assert.deepEqual(customerIdentityForFingerprint(withSnapshot), {
+    id: 5,
+    name: null,
+    phone: null,
+    email: null,
+    address: null,
+  });
+  assert.deepEqual(
+    customerIdentityForFingerprint(withSnapshot),
+    customerIdentityForFingerprint(withoutSnapshot)
+  );
+});
+
+test('missing selected customer is a controlled checkout failure', () => {
+  const intent = normalizeCheckoutIntent({
+    items: [{ product_id: 1, quantity: 1 }],
+    payment_method: 'cash',
+    customer_id: 99,
+  });
+
+  assert.throws(
+    () => resolveCheckoutCustomerSnapshot(intent, null),
+    error => error instanceof CheckoutValidationError &&
+      error.statusCode === 400 &&
+      error.message === 'Customer not found'
+  );
+  assert.throws(
+    () => resolveCheckoutCustomerSnapshot(intent, { id: 8, name: 'Wrong customer' }),
+    /Customer not found/
+  );
+});
+
+test('checkout without a customer keeps the submitted walk-in snapshot', () => {
+  const intent = normalizeCheckoutIntent({
+    items: [{ product_id: 1, quantity: 1 }],
+    payment_method: 'cash',
+    customer_name: ' Walk-in ',
+    customer_phone: '',
+  });
+
+  assert.deepEqual(resolveCheckoutCustomerSnapshot(intent, { id: 5, name: 'Ada' }), {
+    customer_id: null,
+    customer_name: 'Walk-in',
+    customer_phone: null,
+    customer_email: null,
+    customer_address: null,
+  });
+  assert.deepEqual(customerIdentityForFingerprint(intent), {
+    id: null,
+    name: 'Walk-in',
+    phone: null,
+    email: null,
+    address: null,
+  });
 });

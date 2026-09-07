@@ -35,5 +35,6 @@ test('checkout items send variant_id only when present', () => {
 test('POS retains cash checkout and uses normalized cart payload', async () => {
   const source = await readFile(new URL('../pages/POS.jsx', import.meta.url), 'utf8');
   assert.match(source, /items: cartCheckoutItems\(cart\)/);
-  assert.match(source, /payment_method: 'cash'/);
+  assert.match(source, /checkoutRequestBody\(/);
+  assert.match(source, /paymentMethod/);
 });

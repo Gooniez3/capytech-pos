@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const {
   ALLOWED_PAYMENT_METHODS,
   CheckoutValidationError,
+  customerIdentityForFingerprint,
   normalizeCheckoutIntent,
   normalizeDiscount: normalizeDiscountValue,
   normalizePaymentMethod,
@@ -51,13 +52,7 @@ function canonicalizeCheckoutIntent({
     items: normalized.items,
     payment_method: normalized.payment_method,
     discount: normalized.discount,
-    customer: {
-      id: normalized.customer_id,
-      name: normalized.customer_name,
-      phone: normalized.customer_phone,
-      email: normalized.customer_email,
-      address: normalized.customer_address,
-    },
+    customer: customerIdentityForFingerprint(normalized),
   };
 }
 

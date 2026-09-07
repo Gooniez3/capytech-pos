@@ -18,6 +18,7 @@ const {
   checkedLineTotal,
   checkedSubtotal,
   minorUnitsToDatabaseDecimal,
+  resolveCheckoutCustomerSnapshot,
   validateCheckoutRequest,
 } = require('../services/checkout-validation');
 
@@ -311,33 +312,37 @@ router.post('/', requireAuth, async (req, res) => {
     });
   }
 
-  let customerId = null;
+  /*
+   * Customer existence is a checkout command failure (HTTP 400),
+   * matching missing products/variants. GET /api/customers/:id remains 404.
+   * Database customer fields are authoritative when customer_id is present;
+   * client snapshot fields cannot override them.
+   */
+  let databaseCustomer = null;
 
-  if (
-    customer_id !== null &&
-    customer_id !== undefined &&
-    customer_id !== ''
-  ) {
-    const customerResult =
-      await client.query(
-        `
-        SELECT id
+  if (customer_id !== null) {
+    const customerResult = await client.query(
+      `
+        SELECT id, name, phone, email, address
         FROM customers
         WHERE id = $1
-        `,
-        [customer_id]
-      );
+      `,
+      [customer_id]
+    );
 
-    if (
-      customerResult.rows.length === 0
-    ) {
-      throw new CheckoutValidationError(
-        'Customer not found'
-      );
-    }
-
-    customerId = customer_id;
+    databaseCustomer = customerResult.rows[0] || null;
   }
+
+  const saleCustomer = resolveCheckoutCustomerSnapshot(
+    {
+      customer_id,
+      customer_name,
+      customer_phone,
+      customer_email,
+      customer_address,
+    },
+    databaseCustomer
+  );
 
   let subtotalMinorUnits = 0;
   const lineItems = [];
@@ -625,18 +630,6 @@ continue;
         client
       );
       
-     const customerName =
-  customer_name?.trim() || null;
-
-const customerPhone =
-  customer_phone?.trim() || null;
-
-const customerEmail =
-  customer_email?.trim() || null;
-
-const customerAddress =
-  customer_address?.trim() || null;
-
     /*
      * =====================================================
      * SALE
@@ -671,12 +664,12 @@ const customerAddress =
   [
     invoiceNumber,
     req.user.id,
-    customerId,
+    saleCustomer.customer_id,
 
-    customerName,
-    customerPhone,
-    customerEmail,
-    customerAddress,
+    saleCustomer.customer_name,
+    saleCustomer.customer_phone,
+    saleCustomer.customer_email,
+    saleCustomer.customer_address,
 
     subtotal,
     discountAmount,

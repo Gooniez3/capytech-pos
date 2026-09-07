@@ -36,7 +36,7 @@ test('checkout key clears only after confirmed success', () => {
 test('POS includes the key and clears it only in the successful request path', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'pages', 'POS.jsx'), 'utf8');
   const requestStart = source.indexOf("await api.post('/sales'");
-  const keyField = source.indexOf('idempotency_key: checkoutKey', requestStart);
+  const keyField = source.indexOf('idempotencyKey: checkoutKey', requestStart);
   const clearKey = source.indexOf('clearCheckoutKey(checkoutKeyRef)', keyField);
   const catchBlock = source.indexOf('} catch (err) {', clearKey);
 

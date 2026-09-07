@@ -13,6 +13,11 @@ import {
   inventoryTargetKey,
   removeCartTarget,
 } from '../utils/posCart';
+import {
+  DEFAULT_PAYMENT_METHOD,
+  PAYMENT_METHODS,
+  checkoutRequestBody,
+} from '../utils/posCheckout';
 
 export default function POS() {
   const [products, setProducts] = useState([]);
@@ -20,6 +25,11 @@ export default function POS() {
   const [scanInput, setScanInput] = useState('');
   const [message, setMessage] = useState('');
   const [checkingOut, setCheckingOut] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState(DEFAULT_PAYMENT_METHOD);
+  const [customerQuery, setCustomerQuery] = useState('');
+  const [customerResults, setCustomerResults] = useState([]);
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [customerPickerOpen, setCustomerPickerOpen] = useState(false);
   const scanRef = useRef(null);
   const checkoutKeyRef = useRef(null);
   const { user, logout } = useAuth();
@@ -30,6 +40,24 @@ export default function POS() {
     // somewhere to "type" into, even if the cashier clicks elsewhere.
     scanRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    if (!customerPickerOpen || selectedCustomer) return undefined;
+
+    const handle = setTimeout(async () => {
+      try {
+        const res = await api.get('/customers', {
+          params: { search: customerQuery.trim() },
+        });
+        setCustomerResults(res.data);
+      } catch (err) {
+        console.error(err);
+        setCustomerResults([]);
+      }
+    }, 200);
+
+    return () => clearTimeout(handle);
+  }, [customerQuery, customerPickerOpen, selectedCustomer]);
 
   const loadProducts = async () => {
     try {
@@ -79,15 +107,20 @@ export default function POS() {
     setCheckingOut(true);
     const checkoutKey = getOrCreateCheckoutKey(checkoutKeyRef);
     try {
-      const res = await api.post('/sales', {
+      const res = await api.post('/sales', checkoutRequestBody({
         items: cartCheckoutItems(cart),
-        payment_method: 'cash',
-        idempotency_key: checkoutKey,
-      });
+        paymentMethod,
+        customer: selectedCustomer,
+        idempotencyKey: checkoutKey,
+      }));
 
       clearCheckoutKey(checkoutKeyRef);
       setMessage(`Sale complete! Invoice ${res.data.sale.invoice_number}`);
       setCart([]);
+      setSelectedCustomer(null);
+      setCustomerQuery('');
+      setCustomerResults([]);
+      setCustomerPickerOpen(false);
       loadProducts(); // refresh stock counts
 
       // TODO: this is where we'll trigger the thermal printer receipt
@@ -207,8 +240,96 @@ export default function POS() {
             ))}
           </div>
 
-          <div className="border-t mt-3 pt-3">
-            <div className="flex justify-between font-semibold text-lg mb-3">
+          <div className="border-t mt-3 pt-3 space-y-3">
+            <div>
+              <div className="text-sm font-medium text-gray-700 mb-1">Customer</div>
+              {selectedCustomer ? (
+                <div className="border rounded px-3 py-2 text-sm bg-gray-50">
+                  <div className="flex justify-between items-start gap-2">
+                    <div>
+                      <div className="font-medium text-gray-800">{selectedCustomer.name}</div>
+                      {selectedCustomer.phone && (
+                        <div className="text-gray-500">{selectedCustomer.phone}</div>
+                      )}
+                      {selectedCustomer.email && (
+                        <div className="text-gray-500">{selectedCustomer.email}</div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedCustomer(null);
+                        setCustomerQuery('');
+                        setCustomerResults([]);
+                        setCustomerPickerOpen(false);
+                      }}
+                      className="text-xs text-blue-600 underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={customerQuery}
+                    onChange={(e) => setCustomerQuery(e.target.value)}
+                    onFocus={() => setCustomerPickerOpen(true)}
+                    onBlur={() => {
+                      setTimeout(() => setCustomerPickerOpen(false), 150);
+                    }}
+                    placeholder="Search customer (optional)"
+                    className="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {customerPickerOpen && customerResults.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto bg-white border rounded shadow">
+                      {customerResults.map((customer) => (
+                        <button
+                          key={customer.id}
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setSelectedCustomer(customer);
+                            setCustomerQuery('');
+                            setCustomerResults([]);
+                            setCustomerPickerOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50"
+                        >
+                          <div className="font-medium text-gray-800">{customer.name}</div>
+                          <div className="text-xs text-gray-500">
+                            {[customer.phone, customer.email].filter(Boolean).join(' · ') || 'No contact details'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-sm font-medium text-gray-700 mb-1">Payment</div>
+              <div className="grid grid-cols-3 gap-1">
+                {PAYMENT_METHODS.map((method) => (
+                  <button
+                    key={method.value}
+                    type="button"
+                    onClick={() => setPaymentMethod(method.value)}
+                    className={`text-xs py-2 rounded border ${
+                      paymentMethod === method.value
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-white text-gray-700 hover:bg-blue-50'
+                    }`}
+                  >
+                    {method.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-between font-semibold text-lg">
               <span>Total</span>
               <span>₱{subtotal.toFixed(2)}</span>
             </div>

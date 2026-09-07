@@ -39,7 +39,7 @@ for (const [name, mutate] of [
   ['quantity', request => { request.items[0].quantity = 3; }],
   ['payment method', request => { request.payment_method = 'banking'; }],
   ['discount', request => { request.discount = 101; }],
-  ['customer', request => { request.customer_name = 'Grace'; }],
+  ['customer', request => { request.customer_id = 5; }],
   ['authenticated user', request => { request.user_id = 8; }],
 ]) {
   test(`a different ${name} produces a different digest`, () => {
@@ -110,6 +110,37 @@ test('frontend prices, totals, unknown fields and UI state do not affect the dig
   noisy.status = 'refunded';
   noisy.ui_state = { selected: true };
   assert.equal(digest(baseRequest()), digest(noisy));
+});
+
+test('selected customer identity ignores client snapshot fields in the fingerprint', () => {
+  const contradictory = baseRequest();
+  contradictory.customer_name = 'Someone Else';
+  contradictory.customer_phone = '000';
+  contradictory.customer_email = 'other@example.com';
+  contradictory.customer_address = 'Other Street';
+
+  const omitted = baseRequest();
+  delete omitted.customer_name;
+  delete omitted.customer_phone;
+  delete omitted.customer_email;
+  delete omitted.customer_address;
+
+  assert.equal(digest(baseRequest()), digest(contradictory));
+  assert.equal(digest(baseRequest()), digest(omitted));
+  assert.deepEqual(canonicalizeCheckoutIntent(baseRequest()).customer, {
+    id: 4,
+    name: null,
+    phone: null,
+    email: null,
+    address: null,
+  });
+});
+
+test('walk-in snapshot fields remain part of the fingerprint when no customer is selected', () => {
+  const walkIn = baseRequest();
+  walkIn.customer_id = null;
+  const renamed = { ...walkIn, customer_name: 'Grace' };
+  assert.notEqual(digest(walkIn), digest(renamed));
 });
 
 function queryClient(results) {
@@ -529,4 +560,194 @@ test('pool connection failure returns a generic 500 without internal details', a
     assert.equal(response.statusCode, 500);
     assert.deepEqual(response.body, { error: 'Checkout failed' });
   });
+});
+
+function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61 } = {}) {
+  const queries = [];
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values });
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+      if (sql.includes('FROM customers')) return { rows: customerRows ?? [] };
+      if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+        return { rows: [{
+          id: 12,
+          name: 'Mouse',
+          sku: 'MOUSE',
+          price: '100',
+          cost: '50',
+          stock_quantity: 10,
+          low_stock_threshold: 2,
+        }] };
+      }
+      if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
+        return { rows: [{ count: 0 }] };
+      }
+      if (sql.includes('UPDATE products')) {
+        return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
+      }
+      if (sql.includes('nextval(')) return { rows: [{ invoice_number: String(saleId) }] };
+      if (sql.includes('INSERT INTO sales')) {
+        return { rows: [{ id: saleId, invoice_number: `INV-${String(saleId).padStart(6, '0')}` }] };
+      }
+      if (sql.includes('INSERT INTO sale_items')) return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    release() {},
+  };
+  return { client, queries, paymentMethod };
+}
+
+async function postCheckout(body) {
+  const response = responseRecorder();
+  await checkoutHandler()({ body, user: { id: 7 } }, response);
+  return response;
+}
+
+test('selected customer snapshot uses the database record and ignores client fields', async () => {
+  const { client, queries } = productSaleClient({
+    customerRows: [{
+      id: 5,
+      name: ' Ada Lovelace ',
+      phone: ' 091234 ',
+      email: ' ada@example.com ',
+      address: ' Main Street ',
+    }],
+  });
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = await postCheckout({
+      ...validCheckoutBody('823e4567-e89b-42d3-a456-426614174000'),
+      customer_id: 5,
+      customer_name: 'Someone Else',
+      customer_phone: '000',
+      customer_email: 'other@example.com',
+      customer_address: 'Other Street',
+    });
+    assert.equal(response.statusCode, 201);
+  });
+
+  const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
+  assert.deepEqual(saleInsert.values.slice(2, 7), [
+    5,
+    'Ada Lovelace',
+    '091234',
+    'ada@example.com',
+    'Main Street',
+  ]);
+  assert.ok(
+    queries.findIndex(entry => entry.sql.includes('FROM customers')) <
+    queries.findIndex(entry => entry.sql.includes('UPDATE products'))
+  );
+});
+
+test('missing customer fails with HTTP 400 and does not change stock', async () => {
+  const { client, queries } = productSaleClient({ customerRows: [] });
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = await postCheckout({
+      ...validCheckoutBody('923e4567-e89b-42d3-a456-426614174000'),
+      customer_id: 99,
+    });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.body.error, /Customer not found/);
+  });
+
+  assert.equal(queries.some(entry => entry.sql.includes('UPDATE products')), false);
+  assert.equal(queries.some(entry => entry.sql.includes('INSERT INTO sales')), false);
+  assert.ok(queries.some(entry => entry.sql.includes('FROM customers')));
+});
+
+test('checkout without a customer still creates a sale', async () => {
+  const { client, queries } = productSaleClient();
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = await postCheckout(validCheckoutBody('a23e4567-e89b-42d3-a456-426614174000'));
+    assert.equal(response.statusCode, 201);
+  });
+
+  const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
+  assert.equal(saleInsert.values[2], null);
+  assert.equal(queries.some(entry => entry.sql.includes('FROM customers')), false);
+});
+
+test('same key and same request returns the original sale without a second stock update', async () => {
+  const key = 'b23e4567-e89b-42d3-a456-426614174000';
+  const fingerprint = createCheckoutFingerprint({
+    user_id: 7,
+    items: [{ product_id: 12, quantity: 1 }],
+    payment_method: 'cash',
+  });
+  const sale = { id: 41, checkout_request_fingerprint: fingerprint };
+  const items = [{ sale_id: 41, product_id: 12, quantity: 1 }];
+  const queries = [];
+  let connectCalls = 0;
+
+  await withMockPool({
+    async query(sql) {
+      queries.push(sql);
+      if (sql.includes('FROM sales') && sql.includes('idempotency_key')) {
+        return { rows: [sale] };
+      }
+      if (sql.includes('FROM sale_items')) {
+        return { rows: items };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    connect: async () => {
+      connectCalls += 1;
+      throw new Error('Duplicate replay must not open a checkout transaction');
+    },
+  }, async () => {
+    const response = await postCheckout(validCheckoutBody(key));
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.duplicate, true);
+    assert.equal(response.body.sale.id, 41);
+    assert.deepEqual(response.body.items, items);
+  });
+
+  assert.equal(connectCalls, 0);
+  assert.equal(queries.some(sql => sql.includes('UPDATE products')), false);
+});
+
+test('same key and a different request returns HTTP 409 without mutation', async () => {
+  const key = 'c23e4567-e89b-42d3-a456-426614174000';
+  let connectCalls = 0;
+
+  await withMockPool({
+    query: async () => ({
+      rows: [{ id: 41, checkout_request_fingerprint: Buffer.alloc(32, 1) }],
+    }),
+    connect: async () => {
+      connectCalls += 1;
+      throw new Error('Conflict must not open a checkout transaction');
+    },
+  }, async () => {
+    const response = await postCheckout({
+      ...validCheckoutBody(key),
+      payment_method: 'banking',
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(connectCalls, 0);
+  });
+});
+
+test('all supported payment methods are stored on the sale', async () => {
+  const methods = ['cash', 'banking', 'kbzpay', 'wavepay', 'mmqr'];
+
+  for (const [index, paymentMethod] of methods.entries()) {
+    const { client, queries } = productSaleClient({ saleId: 70 + index });
+    await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+      const response = await postCheckout({
+        items: [{ product_id: 12, quantity: 1 }],
+        payment_method: paymentMethod,
+        idempotency_key: `${index}23e4567-e89b-42d3-a456-42661417400${index}`,
+      });
+      assert.equal(response.statusCode, 201);
+    });
+    const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
+    assert.equal(saleInsert.values[10], paymentMethod);
+  }
 });

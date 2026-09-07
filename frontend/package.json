@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host",
     "test:checkout-idempotency": "node --test src/utils/checkoutIdempotency.test.js",
-    "test:pos-cart": "node --test src/utils/posCart.test.js"
+    "test:pos-cart": "node --test src/utils/posCart.test.js",
+    "test:pos-checkout": "node --test src/utils/posCheckout.test.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

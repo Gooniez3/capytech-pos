@@ -177,6 +177,56 @@ function normalizeCustomerText(value, fieldName, maximumLength) {
   return normalized;
 }
 
+function storedCustomerText(value) {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
+function customerIdentityForFingerprint(intent) {
+  if (intent.customer_id !== null) {
+    return {
+      id: intent.customer_id,
+      name: null,
+      phone: null,
+      email: null,
+      address: null,
+    };
+  }
+
+  return {
+    id: null,
+    name: intent.customer_name,
+    phone: intent.customer_phone,
+    email: intent.customer_email,
+    address: intent.customer_address,
+  };
+}
+
+function resolveCheckoutCustomerSnapshot(intent, databaseCustomer = null) {
+  if (intent.customer_id === null) {
+    return {
+      customer_id: null,
+      customer_name: intent.customer_name,
+      customer_phone: intent.customer_phone,
+      customer_email: intent.customer_email,
+      customer_address: intent.customer_address,
+    };
+  }
+
+  if (!databaseCustomer || Number(databaseCustomer.id) !== intent.customer_id) {
+    throw new CheckoutValidationError('Customer not found');
+  }
+
+  return {
+    customer_id: intent.customer_id,
+    customer_name: storedCustomerText(databaseCustomer.name),
+    customer_phone: storedCustomerText(databaseCustomer.phone),
+    customer_email: storedCustomerText(databaseCustomer.email),
+    customer_address: storedCustomerText(databaseCustomer.address),
+  };
+}
+
 function normalizeItems(items) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new CheckoutValidationError('Cart is empty');
@@ -286,6 +336,7 @@ module.exports = {
   authoritativeDecimalToMinorUnits,
   checkedLineTotal,
   checkedSubtotal,
+  customerIdentityForFingerprint,
   minorUnitsToCanonicalDecimal,
   minorUnitsToDatabaseDecimal,
   normalizeCheckoutIntent,
@@ -295,5 +346,6 @@ module.exports = {
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,
   normalizeRequiredInteger,
+  resolveCheckoutCustomerSnapshot,
   validateCheckoutRequest,
 };
