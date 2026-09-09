@@ -18,6 +18,7 @@ import {
   Boxes,
   Percent,
   Eye,
+  FileText,
   X,
 } from 'lucide-react';
 
@@ -117,6 +118,7 @@ interface RefundRow {
   cashierName: string;
   date: string;
   originalSaleDate?: string;
+  reason?: string | null;
   items?: RefundItem[];
 }
 
@@ -178,6 +180,13 @@ function paymentLabel(
     default:
       return method;
   }
+}
+
+function refundReasonText(
+  reason?: string | null
+) {
+  const value = reason?.trim();
+  return value ? value : '';
 }
 
 function RefundInfo({
@@ -949,13 +958,18 @@ const [
         width: 18,
       },
       {
+        header: 'Refund Reason',
+        key: 'reason',
+        width: 40,
+      },
+      {
         header: 'Returned Items',
         key: 'items',
         width: 55,
       },
     ];
 
-    refundsSheet.mergeCells('A1:G1');
+    refundsSheet.mergeCells('A1:H1');
 
     refundsSheet.getCell('A1').value =
       'Refund Analysis';
@@ -978,6 +992,7 @@ const [
       'Cashier',
       'Payment',
       'Refund Amount',
+      'Refund Reason',
       'Returned Items',
     ].forEach((value, index) => {
       const cell =
@@ -1042,6 +1057,10 @@ const [
           amount:
             refund.total,
 
+          reason:
+            refundReasonText(refund.reason) ||
+            'No reason recorded',
+
           items,
         });
 
@@ -1060,10 +1079,20 @@ const [
         vertical: 'top',
       };
 
+      row.getCell(8).alignment = {
+        wrapText: true,
+        vertical: 'top',
+      };
+
+      const reasonLines = Math.ceil(
+        (refundReasonText(refund.reason).length || 18) /
+          40
+      );
+
       row.height = Math.max(
         22,
-        (refund.items?.length ?? 1) *
-          18
+        (refund.items?.length ?? 1) * 18,
+        reasonLines * 18
       );
     });
 
@@ -2114,6 +2143,28 @@ const [
 
               </div>
 
+              {/* Reason */}
+              <div className="min-w-[180px] max-w-[280px] flex-1">
+
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  Reason
+                </p>
+
+                {refundReasonText(refund.reason) ? (
+                  <p
+                    title={refundReasonText(refund.reason)}
+                    className="mt-1 line-clamp-2 text-sm font-medium text-slate-700"
+                  >
+                    {refundReasonText(refund.reason)}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-sm italic text-slate-400">
+                    No reason recorded
+                  </p>
+                )}
+
+              </div>
+
               {/* Amount */}
               <div className="min-w-[130px] lg:text-right">
 
@@ -2278,6 +2329,26 @@ const [
             label="Payment Method"
             value={paymentLabel(selectedRefund.paymentMethod)}
           />
+
+        </div>
+
+        {/* Refund reason */}
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+            <FileText className="h-4 w-4" />
+            Refund Reason
+          </div>
+
+          {refundReasonText(selectedRefund.reason) ? (
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 font-medium text-slate-800">
+              {refundReasonText(selectedRefund.reason)}
+            </p>
+          ) : (
+            <p className="mt-2 text-sm italic text-slate-400">
+              No reason recorded
+            </p>
+          )}
 
         </div>
 

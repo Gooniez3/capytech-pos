@@ -1713,6 +1713,7 @@ router.get(
           s.payment_method,
           s.created_at,
           s.refunded_at,
+          s.refund_reason,
           u.name AS cashier_name,
 
           COALESCE(
@@ -1747,6 +1748,7 @@ router.get(
           s.payment_method,
           s.created_at,
           s.refunded_at,
+          s.refund_reason,
           u.name
 
         ORDER BY
@@ -1773,6 +1775,8 @@ router.get(
 
           // Original transaction time
           originalSaleDate: row.created_at,
+
+          reason: row.refund_reason ?? null,
 
           // Products returned in this refund
           items: Array.isArray(row.items)
