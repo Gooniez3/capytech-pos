@@ -20,3 +20,6 @@ backups/
 
 .DS_Store
 Thumbs.db
+
+backend/storage/product-images/**
+!backend/storage/product-images/.gitkeep

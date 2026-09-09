@@ -45,6 +45,10 @@ const {
   getLanIPv4,
   isAllowedLocalOrigin,
 } = require('./lib/local-network');
+const {
+  ensureProductImageStorage,
+  createProductImageStaticHandler,
+} = require('./services/productImageService');
 
 /* =========================================================
    APP
@@ -89,6 +93,11 @@ app.use(
 app.use(
   '/api/auth',
   authRoutes
+);
+
+app.use(
+  '/api/product-images',
+  createProductImageStaticHandler()
 );
 
 app.use(
@@ -569,5 +578,13 @@ httpServer.listen(
     console.log(
       'Wireless scanner socket ready'
     );
+
+    ensureProductImageStorage()
+      .then((root) => {
+        console.log(`Product images: ${root}`);
+      })
+      .catch((error) => {
+        console.error('Failed to prepare product image storage:', error);
+      });
   }
 );

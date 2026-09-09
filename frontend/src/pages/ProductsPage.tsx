@@ -7,6 +7,7 @@ import {
   Edit,
   Trash2,
   RefreshCw,
+  RotateCcw,
   ChevronRight,
   ChevronDown,
 } from 'lucide-react';
@@ -49,6 +50,14 @@ interface ApiProduct {
 interface ApiCategory {
   id: number | string;
   name: string;
+}
+
+interface ProductImageStatus {
+  image_url?: string | null;
+  image_path?: string | null;
+  has_trashed_image?: boolean;
+  trashed_image_url?: string | null;
+  message?: string;
 }
 
 interface ProductView extends Product {
@@ -237,10 +246,21 @@ const [form, setForm] =
   useState<ProductForm>(emptyForm);
 
   const [selectedImage, setSelectedImage] =
-  useState<File | null>(null);
+    useState<File | null>(null);
 
   const [imagePreview, setImagePreview] =
-  useState<string | null>(null);  
+  useState<string | null>(null);
+
+  const [savedImageUrl, setSavedImageUrl] =
+    useState<string | null>(null);
+
+  const [hasTrashedImage, setHasTrashedImage] =
+    useState(false);
+
+  const [trashedImageUrl, setTrashedImageUrl] =
+    useState<string | null>(null);
+
+  const [imageBusy, setImageBusy] = useState(false);
 
   const [variants, setVariants] =
   useState<VariantForm[]>([]);
@@ -411,6 +431,67 @@ async function toggleProductVariants(
   setImagePreview(URL.createObjectURL(file));
 }
 
+function applyImageStatus(
+  status: ProductImageStatus,
+  productId?: string
+) {
+  const nextUrl = status.image_url ?? null;
+
+  if (
+    imagePreview &&
+    imagePreview.startsWith('blob:')
+  ) {
+    URL.revokeObjectURL(imagePreview);
+  }
+
+  setSelectedImage(null);
+  setImagePreview(nextUrl);
+  setSavedImageUrl(nextUrl);
+  setHasTrashedImage(Boolean(status.has_trashed_image));
+  setTrashedImageUrl(status.trashed_image_url ?? null);
+
+  const id = productId ?? editingProduct?.id;
+  if (!id) return;
+
+  setProducts((current) =>
+    current.map((product) =>
+      product.id === id
+        ? {
+            ...product,
+            imageUrl: nextUrl,
+            imagePath: status.image_path ?? null,
+          }
+        : product
+    )
+  );
+
+  setEditingProduct((current) =>
+    current && current.id === id
+      ? {
+          ...current,
+          imageUrl: nextUrl,
+          imagePath: status.image_path ?? null,
+        }
+      : current
+  );
+}
+
+function resetImageState() {
+  if (
+    imagePreview &&
+    imagePreview.startsWith('blob:')
+  ) {
+    URL.revokeObjectURL(imagePreview);
+  }
+
+  setSelectedImage(null);
+  setImagePreview(null);
+  setSavedImageUrl(null);
+  setHasTrashedImage(false);
+  setTrashedImageUrl(null);
+  setImageBusy(false);
+}
+
 function removeSelectedImage() {
   if (
     imagePreview &&
@@ -420,10 +501,62 @@ function removeSelectedImage() {
   }
 
   setSelectedImage(null);
+  setImagePreview(savedImageUrl);
+}
 
-  setImagePreview(
-    editingProduct?.imageUrl ?? null
+async function trashSavedImage() {
+  if (!editingProduct || !savedImageUrl || imageBusy) return;
+
+  const confirmed = window.confirm(
+    'Move this product image to trash?\n\nYou can restore it from this page.'
   );
+  if (!confirmed) return;
+
+  setImageBusy(true);
+  try {
+    const status = await api.post<ProductImageStatus>(
+      `/api/products/${editingProduct.id}/image/trash`
+    );
+    applyImageStatus(status, editingProduct.id);
+    toast(
+      status.message || 'Image moved to trash.',
+      'success'
+    );
+  } catch (error) {
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'Failed to move image to trash.',
+      'error'
+    );
+  } finally {
+    setImageBusy(false);
+  }
+}
+
+async function restoreTrashedImage() {
+  if (!editingProduct || !hasTrashedImage || imageBusy) return;
+
+  setImageBusy(true);
+  try {
+    const status = await api.post<ProductImageStatus>(
+      `/api/products/${editingProduct.id}/image/restore`
+    );
+    applyImageStatus(status, editingProduct.id);
+    toast(
+      status.message || 'Image restored.',
+      'success'
+    );
+  } catch (error) {
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'Failed to restore image.',
+      'error'
+    );
+  } finally {
+    setImageBusy(false);
+  }
 }
 
   function addVariant() {
@@ -519,10 +652,7 @@ async function removeVariant(index: number) {
   });
 
   setVariants([]);
-
-  setSelectedImage(null);
-  setImagePreview(null);
-
+  resetImageState();
   setAddOpen(true);
 }
 
@@ -533,6 +663,9 @@ async function openEditProduct(
 
   setSelectedImage(null);
   setImagePreview(product.imageUrl ?? null);
+  setSavedImageUrl(product.imageUrl ?? null);
+  setHasTrashedImage(false);
+  setTrashedImageUrl(null);
 
   setForm({
     name: product.name,
@@ -592,17 +725,30 @@ async function openEditProduct(
   } finally {
     setLoadingVariants(false);
   }
+
+  try {
+    const imageStatus = await api.get<ProductImageStatus>(
+      `/api/products/${product.id}/image`
+    );
+    applyImageStatus(imageStatus, product.id);
+  } catch (error) {
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'Failed to load product image.',
+      'error'
+    );
+  }
 }
 
   function closeProductModal() {
-  if (saving) return;
+  if (saving || imageBusy) return;
 
   setAddOpen(false);
   setEditingProduct(null);
   setForm(emptyForm);
   setVariants([]);
-  setSelectedImage(null);
-setImagePreview(null);
+  resetImageState();
 }
 
   async function saveProduct() {
@@ -1773,7 +1919,7 @@ renderExpandedRow={(product) => {
             />
           </label>
 
-          {selectedImage && (
+          {selectedImage ? (
             <button
               type="button"
               onClick={removeSelectedImage}
@@ -1781,7 +1927,16 @@ renderExpandedRow={(product) => {
             >
               Remove
             </button>
-          )}
+          ) : savedImageUrl ? (
+            <button
+              type="button"
+              onClick={trashSavedImage}
+              disabled={imageBusy}
+              className="rounded-lg px-3 py-2 text-xs font-semibold text-danger-600 hover:bg-danger-50 disabled:opacity-50"
+            >
+              Move to trash
+            </button>
+          ) : null}
         </div>
 
       </div>
@@ -1807,6 +1962,43 @@ renderExpandedRow={(product) => {
         className="hidden"
       />
     </label>
+  )}
+
+  {editingProduct && hasTrashedImage && (
+    <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3">
+      {trashedImageUrl ? (
+        <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+          <img
+            src={trashedImageUrl}
+            alt="Image in trash"
+            className="h-full w-full object-contain p-1"
+          />
+        </div>
+      ) : (
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-400">
+          <Trash2 className="h-4 w-4" />
+        </div>
+      )}
+
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-slate-700">
+          Image in trash
+        </p>
+        <p className="text-xs text-slate-400">
+          Restore puts this photo back on the product.
+        </p>
+      </div>
+
+      <button
+        type="button"
+        onClick={restoreTrashedImage}
+        disabled={imageBusy}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+      >
+        <RotateCcw className="h-3.5 w-3.5" />
+        Restore image
+      </button>
+    </div>
   )}
 </div>
           <Input

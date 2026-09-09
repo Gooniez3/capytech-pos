@@ -14,6 +14,10 @@ const uploadProductImageMiddleware = require(
 const {
   uploadProductImage,
   deleteProductImage,
+  trashProductImage,
+  restoreProductImage,
+  getLatestTrashedImage,
+  ProductImageError,
 } = require('../services/productImageService');
 
 const {
@@ -49,6 +53,16 @@ function cleanSku(value) {
   return String(value || '')
     .trim()
     .toUpperCase();
+}
+
+function imageStatusPayload(product, trash) {
+  return {
+    image_url: product.image_url || null,
+    image_path: product.image_path || null,
+    has_trashed_image: Boolean(trash),
+    trashed_image_url: trash?.publicUrl || null,
+    trashed_at: trash?.trashedAt || null,
+  };
 }
 
 /**
@@ -862,6 +876,206 @@ router.get(
 );
 
 /**
+ * GET /api/products/:id/image
+ *
+ * Current photo plus the latest file in this product's image trash.
+ */
+router.get(
+  '/:id/image',
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+        SELECT id, sku, image_url, image_path
+        FROM products
+        WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+
+      const product = result.rows[0];
+      const trash = await getLatestTrashedImage(product.id);
+      return res.json(imageStatusPayload(product, trash));
+    } catch (err) {
+      if (err instanceof ProductImageError) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+      console.error('Failed to load product image status:', err);
+      return res.status(500).json({ error: 'Failed to load product image' });
+    }
+  }
+);
+
+/**
+ * POST /api/products/:id/image/trash
+ *
+ * Moves the current local photo to trash and clears image_url / image_path.
+ */
+router.post(
+  '/:id/image/trash',
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await revalidateCurrentProductAdmin(client, req.user.id, { lock: true });
+
+      const productResult = await client.query(
+        `
+        SELECT id, sku, image_url, image_path
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [req.params.id]
+      );
+
+      if (productResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Product not found' });
+      }
+
+      const product = productResult.rows[0];
+      if (!product.image_url && !product.image_path) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Product has no image to move to trash' });
+      }
+
+      const oldImagePath = product.image_path;
+
+      const updated = await client.query(
+        `
+        UPDATE products
+        SET image_url = NULL, image_path = NULL, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, sku, image_url, image_path
+        `,
+        [product.id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (user_id, action, details)
+         VALUES ($1, 'TRASH_PRODUCT_IMAGE', $2)`,
+        [req.user.id, `Moved product image to trash for ${product.id} (${product.sku})`]
+      );
+
+      await client.query('COMMIT');
+
+      await trashProductImage(product.id, oldImagePath);
+      const trash = await getLatestTrashedImage(product.id);
+      return res.json({
+        message: trash
+          ? 'Image moved to trash.'
+          : 'Image removed. No local copy was available to restore.',
+        ...imageStatusPayload(updated.rows[0], trash),
+      });
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Ignore rollback failure.
+      }
+
+      if (err instanceof ProductImageError || err instanceof ProductRecycleBinError) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+
+      console.error('Failed to trash product image:', err);
+      return res.status(500).json({ error: 'Failed to move image to trash' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/**
+ * POST /api/products/:id/image/restore
+ *
+ * Restores the latest trashed photo. If the product already has a photo,
+ * that file is moved to trash first so restore stays reversible.
+ */
+router.post(
+  '/:id/image/restore',
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await revalidateCurrentProductAdmin(client, req.user.id, { lock: true });
+
+      const productResult = await client.query(
+        `
+        SELECT id, sku, image_url, image_path
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [req.params.id]
+      );
+
+      if (productResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Product not found' });
+      }
+
+      const product = productResult.rows[0];
+      const restoredImage = await restoreProductImage(product.id, {
+        currentImagePath: product.image_path,
+      });
+
+      const updated = await client.query(
+        `
+        UPDATE products
+        SET image_url = $2, image_path = $3, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, sku, image_url, image_path
+        `,
+        [product.id, restoredImage.imageUrl, restoredImage.imagePath]
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (user_id, action, details)
+         VALUES ($1, 'RESTORE_PRODUCT_IMAGE', $2)`,
+        [req.user.id, `Restored product image for ${product.id} (${product.sku})`]
+      );
+
+      await client.query('COMMIT');
+
+      const trash = await getLatestTrashedImage(product.id);
+      return res.json({
+        message: 'Image restored.',
+        ...imageStatusPayload(updated.rows[0], trash),
+      });
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Ignore rollback failure.
+      }
+
+      if (err instanceof ProductImageError || err instanceof ProductRecycleBinError) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+
+      console.error('Failed to restore product image:', err);
+      return res.status(500).json({ error: 'Failed to restore image' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/**
  * GET /api/products/:id/barcode
  *
  * Generate parent product barcode.
@@ -1109,7 +1323,7 @@ router.put(
       await client.query('COMMIT');
 
       // ---------------------------------
-      // 5. Delete OLD image
+      // 5. Move OLD image to trash
       // ---------------------------------
       // Only after DB commit succeeds.
       if (
@@ -1119,12 +1333,13 @@ router.put(
           newUploadedImage.imagePath
       ) {
         try {
-          await deleteProductImage(
+          await trashProductImage(
+            result.rows[0].id,
             oldImagePath
           );
         } catch (imageError) {
           console.error(
-            'Product updated, but old image cleanup failed:',
+            'Product updated, but old image could not be moved to trash:',
             imageError
           );
         }

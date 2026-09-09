@@ -17,7 +17,8 @@
     "test:product-recycle-bin": "node --test src/services/product-recycle-bin.test.js",
     "test:checkout-idempotency": "node --test src/services/checkout-fingerprint.test.js",
     "test:checkout-validation": "node --test src/services/checkout-validation.test.js",
-    "test:local-network": "node --test src/lib/local-network.test.js"
+    "test:local-network": "node --test src/lib/local-network.test.js",
+    "test:product-images": "node --test src/services/productImageService.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
