@@ -212,6 +212,10 @@ router.put(
       });
     }
 
+    // Checkout does not charge tax. Keep 0 so Settings cannot
+    // show a rate the till will never collect.
+    const storedTaxRate = 0;
+
     try {
       const result =
         await pool.query(
@@ -245,7 +249,7 @@ router.put(
             email || null,
             address || null,
             currency,
-            taxRate,
+            storedTaxRate,
           ]
         );
 

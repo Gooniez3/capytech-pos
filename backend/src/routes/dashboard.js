@@ -66,14 +66,11 @@ router.get('/', requireAuth, async (req, res) => {
       SELECT
         COALESCE(
           SUM(
-            (
-              si.unit_price -
-              COALESCE(si.unit_cost, 0)
-            )
-            * si.quantity
+            COALESCE(si.unit_cost, 0) *
+            si.quantity
           ),
           0
-        ) AS gross_profit,
+        ) AS cogs,
 
         COALESCE(
           SUM(si.quantity),
@@ -90,11 +87,15 @@ router.get('/', requireAuth, async (req, res) => {
         AND s.created_at::date = CURRENT_DATE
     `);
 
-    const grossProfit =
-      Number(profitResult.rows[0].gross_profit);
+    const todayCogs =
+      Number(profitResult.rows[0].cogs);
 
     const unitsSold =
       Number(profitResult.rows[0].units_sold);
+
+    // Net after discount: sales.total already subtracts discount.
+    const grossProfit =
+      todayRevenue - todayCogs;
 
     const grossMargin =
       todayRevenue > 0
@@ -197,17 +198,14 @@ router.get('/', requireAuth, async (req, res) => {
           created_at::date
       ),
 
-      profit AS (
+      cogs AS (
         SELECT
           s.created_at::date AS day,
 
           SUM(
-            (
-              si.unit_price -
-              COALESCE(si.unit_cost, 0)
-            )
-            * si.quantity
-          ) AS profit
+            COALESCE(si.unit_cost, 0) *
+            si.quantity
+          ) AS cogs
 
         FROM sale_items si
 
@@ -232,7 +230,12 @@ router.get('/', requireAuth, async (req, res) => {
         ) AS revenue,
 
         COALESCE(
-          profit.profit,
+          revenue.revenue,
+          0
+        )
+        -
+        COALESCE(
+          cogs.cogs,
           0
         ) AS profit
 
@@ -241,8 +244,8 @@ router.get('/', requireAuth, async (req, res) => {
       LEFT JOIN revenue
         ON revenue.day = days.day
 
-      LEFT JOIN profit
-        ON profit.day = days.day
+      LEFT JOIN cogs
+        ON cogs.day = days.day
 
       ORDER BY days.day
     `);
@@ -269,7 +272,16 @@ router.get('/', requireAuth, async (req, res) => {
 
         SUM(si.quantity) AS units,
 
-        SUM(si.line_total) AS revenue
+        SUM(
+          CASE
+            WHEN s.subtotal > 0
+            THEN
+              si.line_total *
+              (s.total / s.subtotal)
+            ELSE
+              si.line_total
+          END
+        ) AS revenue
 
       FROM sale_items si
 

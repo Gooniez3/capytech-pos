@@ -58,10 +58,14 @@ router.get(
         0
       ) AS gross_sales,
 
-      COUNT(*) AS transactions,
+      COUNT(*) FILTER (
+        WHERE status = 'completed'
+      ) AS transactions,
 
       COALESCE(
-        SUM(discount),
+        SUM(discount) FILTER (
+          WHERE status = 'completed'
+        ),
         0
       ) AS discounts
 
@@ -235,8 +239,8 @@ const refundCount =
   );
 
 const refundRate =
-  transactions > 0
-    ? (refundCount / transactions) * 100
+  (transactions + refundCount) > 0
+    ? (refundCount / (transactions + refundCount)) * 100
     : 0; 
 
       // ---------------------------------
@@ -1583,7 +1587,9 @@ router.get(
             SELECT
               payment_method,
 
-              COUNT(*) AS transactions,
+              COUNT(*) FILTER (
+                WHERE status = 'completed'
+              ) AS transactions,
 
               COALESCE(
                 SUM(total),
