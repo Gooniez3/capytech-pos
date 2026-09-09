@@ -40,6 +40,12 @@ const settingsRoutes =
 const notificationRoutes =
   require('./routes/notifications');
 
+const { requireAuth } = require('./middleware/auth');
+const {
+  getLanIPv4,
+  isAllowedLocalOrigin,
+} = require('./lib/local-network');
+
 /* =========================================================
    APP
    ========================================================= */
@@ -47,27 +53,14 @@ const notificationRoutes =
 const app = express();
 
 /* =========================================================
-   ALLOWED FRONTEND ORIGINS
-   ========================================================= */
-
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://localhost:5173',
-  'https://127.0.0.1:5173',
-  'http://192.168.1.7:5173',
-  'https://192.168.1.7:5173',
-];
-
-/* =========================================================
    MIDDLEWARE
    ========================================================= */
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      callback(null, isAllowedLocalOrigin(origin));
+    },
 
     methods: [
       'GET',
@@ -158,6 +151,16 @@ app.get(
   }
 );
 
+app.get(
+  '/api/runtime',
+  requireAuth,
+  (req, res) => {
+    res.json({
+      lanIPv4: getLanIPv4(),
+    });
+  }
+);
+
 /* =========================================================
    HTTP SERVER
    ========================================================= */
@@ -173,7 +176,9 @@ const io = new Server(
   httpServer,
   {
     cors: {
-      origin: allowedOrigins,
+      origin: (origin, callback) => {
+        callback(null, isAllowedLocalOrigin(origin));
+      },
 
       methods: [
         'GET',
@@ -554,8 +559,11 @@ httpServer.listen(
       `Local access: http://localhost:${PORT}`
     );
 
+    const lanIPv4 = getLanIPv4();
     console.log(
-      `Network access: http://<your-PC-local-IP>:${PORT}`
+      lanIPv4
+        ? `Network access: http://${lanIPv4}:${PORT}`
+        : `Network access: http://<your-PC-local-IP>:${PORT}`
     );
 
     console.log(

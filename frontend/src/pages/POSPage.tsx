@@ -16,6 +16,7 @@ import {
   useWirelessScanner,
 } from '@/context/WirelessScannerContext';
 
+import { buildPhoneScannerPageUrl } from '@/lib/phoneScannerUrl';
 import QRCode from 'qrcode';
 
 import {
@@ -1354,21 +1355,30 @@ useEffect(() => {
   async function generatePhoneScannerQr() {
     try {
       /*
-       * IMPORTANT FOR LOCAL DEVELOPMENT:
-       *
-       * A phone cannot use localhost because localhost
-       * would point to the phone itself.
-       *
-       * If the POS is already opened through the PC's
-       * LAN IP, use that automatically.
-       *
-       * Otherwise use the current development LAN IP.
+       * A phone cannot open localhost — that would be the
+       * phone itself. If the POS is already using a LAN
+       * address, keep it. Otherwise ask the backend for the
+       * Mac/PC Wi-Fi IP and put that in the QR.
        */
+      let lanIPv4: string | null = null;
 
-      const scannerUrl =
-  `${window.location.origin}/scanner?session=${encodeURIComponent(
-    sessionId
-  )}`;
+      try {
+        const runtime = await api.get<{ lanIPv4: string | null }>(
+          '/api/runtime'
+        );
+        lanIPv4 = runtime.lanIPv4;
+      } catch (runtimeError) {
+        console.error(
+          'Could not read LAN address for phone scanner:',
+          runtimeError
+        );
+      }
+
+      const scannerUrl = buildPhoneScannerPageUrl({
+        sessionId,
+        pageOrigin: window.location.origin,
+        lanIPv4,
+      });
 
       const qrDataUrl =
         await QRCode.toDataURL(
@@ -2637,6 +2647,21 @@ const scannedProductAvailable =
       >
         Your phone will open the CapyTech
         wireless barcode scanner.
+      </p>
+
+      <p
+        className="
+          mt-2
+          text-xs
+          leading-5
+          text-slate-500
+        "
+      >
+        Phone and Mac must be on the same Wi-Fi
+        (not a guest network). If the phone warns
+        about the certificate, tap Advanced and
+        continue. Camera scanning needs that HTTPS
+        page.
       </p>
     </div>
 

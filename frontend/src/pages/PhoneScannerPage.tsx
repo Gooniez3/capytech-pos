@@ -121,8 +121,8 @@ useEffect(() => {
   path: '/socket.io',
 
   transports: [
-    'websocket',
     'polling',
+    'websocket',
   ],
 
   tryAllTransports: true,
