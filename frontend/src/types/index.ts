@@ -98,6 +98,7 @@ export interface RevenuePoint {
   label: string;
   revenue: number;
   profit: number;
+  cogs?: number;
 }
 
 export interface TopProduct {

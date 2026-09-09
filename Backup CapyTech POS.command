@@ -18,7 +18,8 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 echo
-echo "Backing up CapyTech POS..."
+echo "Plug in a USB stick first if you have one."
+echo "This also saves a copy inside the shop folder."
 echo
 
 node scripts/backup-shop.mjs

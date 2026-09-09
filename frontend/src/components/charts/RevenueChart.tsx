@@ -10,9 +10,23 @@ interface Point {
   label: string;
   revenue: number;
   profit: number;
+  cogs: number;
   x: number;
   revenueY: number;
   profitY: number;
+}
+
+function shopMarginPercent(
+  profit: number,
+  cogs: number
+) {
+  const netOfTax = profit + cogs;
+
+  if (netOfTax === 0) {
+    return 0;
+  }
+
+  return (profit / netOfTax) * 100;
 }
 
 export function RevenueChart({ data }: RevenueChartProps) {
@@ -32,11 +46,21 @@ export function RevenueChart({ data }: RevenueChartProps) {
 
   const normalized = useMemo(
     () =>
-      data.map((item) => ({
-        label: item.label,
-        revenue: Number(item.revenue) || 0,
-        profit: Number(item.profit) || 0,
-      })),
+      data.map((item) => {
+        const revenue = Number(item.revenue) || 0;
+        const profit = Number(item.profit) || 0;
+        const cogs =
+          item.cogs !== undefined
+            ? Number(item.cogs) || 0
+            : Math.max(0, revenue - profit);
+
+        return {
+          label: item.label,
+          revenue,
+          profit,
+          cogs,
+        };
+      }),
     [data]
   );
 
@@ -462,10 +486,9 @@ export function RevenueChart({ data }: RevenueChartProps) {
                       </span>
 
                       <span className="font-semibold text-slate-700">
-                        {(
-                          (active.profit /
-                            active.revenue) *
-                          100
+                        {shopMarginPercent(
+                          active.profit,
+                          active.cogs
                         ).toFixed(1)}
                         %
                       </span>

@@ -32,6 +32,19 @@ interface ReportTrendChartProps {
   range: ReportRange;
 }
 
+function shopMarginPercent(
+  profit: number,
+  cogs: number
+) {
+  const netOfTax = profit + cogs;
+
+  if (netOfTax === 0) {
+    return 0;
+  }
+
+  return (profit / netOfTax) * 100;
+}
+
 interface ChartPoint {
   date: string;
   label: string;
@@ -174,14 +187,10 @@ export function ReportTrendChart({
       );
     }, [normalized]);
 
-  const overallMargin =
-    totals.revenue > 0
-      ? (
-          totals.profit /
-          totals.revenue
-        ) *
-        100
-      : 0;
+  const overallMargin = shopMarginPercent(
+    totals.profit,
+    totals.cogs
+  );
 
   /* =========================================================
      SCALE
@@ -959,18 +968,10 @@ export function ReportTrendChart({
                       </span>
 
                       <span className="text-xs font-bold text-slate-900">
-                        {active.revenue >
-                        0
-                          ? (
-                              (
-                                active.profit /
-                                active.revenue
-                              ) *
-                              100
-                            ).toFixed(
-                              1
-                            )
-                          : '0.0'}
+                        {shopMarginPercent(
+                          active.profit,
+                          active.cogs
+                        ).toFixed(1)}
                         %
                       </span>
 

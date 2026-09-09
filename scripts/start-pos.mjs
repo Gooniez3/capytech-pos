@@ -156,8 +156,13 @@ async function main() {
   say('');
 
   if (!fs.existsSync(path.join(backendDir, '.env'))) {
-    say('The shop is not set up on this computer yet.');
-    say('Ask your installer to copy the shop files and database first.');
+    if (process.platform === 'darwin') {
+      say('This Mac is not set up as the shop yet.');
+      say('Double-click Install CapyTech POS, then try Start again.');
+    } else {
+      say('The shop is not set up on this computer yet.');
+      say('Ask your installer to copy the shop files and database first.');
+    }
     process.exitCode = 1;
     return;
   }

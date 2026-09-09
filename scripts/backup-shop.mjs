@@ -154,6 +154,42 @@ function folderSize(dir) {
   return total;
 }
 
+function usbDestinations(stampName) {
+  const found = [];
+
+  if (process.platform === 'darwin' && fs.existsSync('/Volumes')) {
+    const skip = new Set([
+      'Macintosh HD',
+      'Macintosh HD - Data',
+      'com.apple.TimeMachine.localsnapshots',
+    ]);
+
+    for (const name of fs.readdirSync('/Volumes')) {
+      if (skip.has(name) || name.startsWith('.')) {
+        continue;
+      }
+      const volume = path.join('/Volumes', name);
+      try {
+        const stat = fs.statSync(volume);
+        if (!stat.isDirectory()) {
+          continue;
+        }
+        if (fs.realpathSync(volume) === fs.realpathSync('/')) {
+          continue;
+        }
+        fs.accessSync(volume, fs.constants.W_OK);
+        found.push(
+          path.join(volume, 'CapyTech POS Backups', stampName)
+        );
+      } catch {
+        // Not a usable USB volume.
+      }
+    }
+  }
+
+  return found;
+}
+
 function formatSize(bytes) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -239,7 +275,15 @@ async function main() {
       '',
       'Keep this whole folder on a USB stick, not only on this computer.',
       '',
-      'To restore (installer only):',
+      'Do NOT restore a Windows test backup onto the customer Mac.',
+      'The Mac shop must start empty: first owner account, first sale INV-000001.',
+      '',
+      'Daily: plug in a USB stick and double-click Backup CapyTech POS.',
+      'Also turn on Time Machine:',
+      '  System Settings → General → Time Machine → Add Backup Disk.',
+      '  Use a different disk than this USB stick if you can.',
+      '',
+      'To restore (installer only, same shop computer):',
       `  pg_restore --clean --if-exists --no-owner -h localhost -U postgres -d ${dbName} ${dbName}.dump`,
       '  Copy product-images into backend/storage/product-images',
       '  Copy shop.env to backend/.env',
@@ -257,8 +301,22 @@ async function main() {
   say(`Database: ${formatSize(dumpBytes)}`);
   say(`Photos:   ${formatSize(photoBytes)}`);
   say('');
-  say('Copy this folder to a USB stick or an external drive.');
-  say('Do not keep the only copy on this computer.');
+
+  const usbCopies = usbDestinations(path.basename(dest));
+  if (usbCopies.length) {
+    for (const usbPath of usbCopies) {
+      fs.cpSync(dest, usbPath, { recursive: true });
+      say(`Copied to USB: ${usbPath}`);
+    }
+  } else {
+    say('No USB stick found. Copy this folder to a USB stick now.');
+    say('Do not keep the only copy on this computer.');
+  }
+
+  if (!isWindows) {
+    say('');
+    say('Time Machine: System Settings → General → Time Machine → Add Backup Disk.');
+  }
 }
 
 await main().catch((error) => {

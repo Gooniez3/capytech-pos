@@ -62,6 +62,7 @@ interface RevenuePoint {
   label: string;
   revenue: number;
   profit: number;
+  cogs?: number;
 }
 
 interface TopProduct {

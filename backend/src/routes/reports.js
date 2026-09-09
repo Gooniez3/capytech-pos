@@ -1479,7 +1479,7 @@ router.get(
                 THEN
                   si.line_total *
                   (
-                    s.total /
+                    (s.total - COALESCE(s.tax, 0)) /
                     s.subtotal
                   )
                 ELSE
@@ -1529,7 +1529,7 @@ router.get(
                   THEN
                     si.line_total *
                     (
-                      s.total /
+                      (s.total - COALESCE(s.tax, 0)) /
                       s.subtotal
                     )
                   ELSE

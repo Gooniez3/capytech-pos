@@ -43,14 +43,27 @@ async function main() {
   say('========================================');
   say('');
 
+  if (process.platform === 'win32') {
+    say('This wipe is for the customer MacBook Air only.');
+    say('This Windows PC has the live shop. Nothing was deleted.');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (process.platform !== 'darwin') {
+    say('Run this only on the shop Mac.');
+    process.exitCode = 1;
+    return;
+  }
+
   if (!hasFlag('--yes-wipe-test-data')) {
-    say('This erases ALL test sales, products, customers, and logins.');
-    say('The customer then creates their own account on the login screen.');
+    say('This erases leftover test logins and products on an EMPTY Mac shop.');
+    say('The owner then creates their own account on the login screen.');
     say('');
-    say('Run only on handoff day:');
+    say('Run only on the customer Mac, and only if there are zero sales:');
     say('  node scripts/prepare-customer-shop.mjs --yes-wipe-test-data');
     say('');
-    say('Do not run this while you are still testing.');
+    say('Do not run this on Windows. Do not restore the test USB backup.');
     process.exitCode = 1;
     return;
   }
@@ -58,6 +71,30 @@ async function main() {
   const client = await pool.connect();
 
   try {
+    const sales = await client.query(`
+      SELECT COUNT(*)::int AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = 'sales'
+    `);
+
+    if (sales.rows[0].count !== 1) {
+      say('No shop tables yet. Double-click Install CapyTech POS first.');
+      process.exitCode = 1;
+      return;
+    }
+
+    const sold = await client.query(
+      'SELECT COUNT(*)::int AS count FROM sales'
+    );
+    if (sold.rows[0].count > 0) {
+      say(`This database already has ${sold.rows[0].count} sale(s).`);
+      say('Refusing to wipe a shop that has sold.');
+      say('Do not restore the Windows test backup onto this Mac.');
+      process.exitCode = 1;
+      return;
+    }
+
     await client.query('BEGIN');
 
     await client.query(`
@@ -85,6 +122,10 @@ async function main() {
     throw error;
   } finally {
     client.release();
+  }
+
+  if (process.exitCode) {
+    return;
   }
 
   clearImageFolder('products');

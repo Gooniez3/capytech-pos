@@ -259,7 +259,12 @@ router.get('/', requireAuth, async (req, res) => {
         COALESCE(
           cogs.cogs,
           0
-        ) AS profit
+        ) AS profit,
+
+        COALESCE(
+          cogs.cogs,
+          0
+        ) AS cogs
 
       FROM days
 
@@ -277,6 +282,7 @@ router.get('/', requireAuth, async (req, res) => {
         label: row.label,
         revenue: Number(row.revenue),
         profit: Number(row.profit),
+        cogs: Number(row.cogs),
       }));
 
     /* =====================================================
@@ -299,7 +305,10 @@ router.get('/', requireAuth, async (req, res) => {
             WHEN s.subtotal > 0
             THEN
               si.line_total *
-              (s.total / s.subtotal)
+              (
+                (s.total - COALESCE(s.tax, 0)) /
+                s.subtotal
+              )
             ELSE
               si.line_total
           END
