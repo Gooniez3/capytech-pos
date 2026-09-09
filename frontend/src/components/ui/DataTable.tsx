@@ -28,6 +28,7 @@ interface DataTableProps<T> {
   minWidth?: string;
 
   isRowExpanded?: (row: T) => boolean;
+  /** Extra `<tr>` nodes shown under an expanded parent row. */
   renderExpandedRow?: (row: T) => ReactNode;
 }
 
@@ -126,32 +127,20 @@ export function DataTable<T>({
                     }`}
                   >
                     {columns.map((col) => (
-                      <td
-                        key={col.key}
-                        className={`px-4 py-3.5 text-sm text-slate-700 ${alignClass(
-                          col.align
-                        )}`}
-                      >
+                  <td
+                    key={col.key}
+                    className={`px-4 py-3.5 align-top text-sm text-slate-700 ${alignClass(
+                      col.align
+                    )}`}
+                  >
                         {col.render(row)}
                       </td>
                     ))}
                   </tr>
 
-                  {expanded &&
-                    renderExpandedRow && (
-                      <tr>
-                        <td
-                          colSpan={
-                            columns.length
-                          }
-                          className="p-0 bg-slate-50/70"
-                        >
-                          {renderExpandedRow(
-                            row
-                          )}
-                        </td>
-                      </tr>
-                    )}
+                  {expanded && renderExpandedRow
+                    ? renderExpandedRow(row)
+                    : null}
                 </Fragment>
               );
             })}

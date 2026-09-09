@@ -60,6 +60,32 @@ interface ProductImageStatus {
   message?: string;
 }
 
+interface ApiDeletedProduct {
+  id: number | string;
+  sku: string;
+  name: string;
+  category_name?: string | null;
+  deleted_at?: string | null;
+  deleted_by_username?: string | null;
+  variant_count?: number | string;
+  is_legacy_deleted?: boolean;
+}
+
+function formatDeletedAt(value?: string | null) {
+  if (!value) return 'Unknown date';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Unknown date';
+
+  return date.toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 interface ProductView extends Product {
   categoryName?: string;
   variantCount?: number;
@@ -215,6 +241,8 @@ export function ProductsPage() {
 
   const [products, setProducts] = useState<ProductView[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [deletedProducts, setDeletedProducts] = useState<ApiDeletedProduct[]>([]);
+  const [listView, setListView] = useState<'catalog' | 'deleted'>('catalog');
 
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
@@ -281,13 +309,15 @@ const [loadingVariants, setLoadingVariants] =
     setLoading(true);
 
     try {
-      const [productData, categoryData] = await Promise.all([
+      const [productData, categoryData, deletedData] = await Promise.all([
         api.get<ApiProduct[]>('/api/products'),
         api.get<ApiCategory[]>('/api/categories'),
+        api.get<ApiDeletedProduct[]>('/api/products/deleted').catch(() => []),
       ]);
 
       setProducts(productData.map(mapProduct));
       setCategories(categoryData.map(mapCategory));
+      setDeletedProducts(deletedData);
     } catch (error) {
       toast(
         error instanceof Error
@@ -365,6 +395,18 @@ async function toggleProductVariants(
     categoryFilter,
     statusFilter,
   ]);
+
+  const deletedFiltered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+
+    return deletedProducts.filter((product) => {
+      if (!term) return true;
+      return (
+        product.name.toLowerCase().includes(term) ||
+        product.sku.toLowerCase().includes(term)
+      );
+    });
+  }, [deletedProducts, search]);
 
   function categoryName(product: ProductView) {
     if (product.categoryName) {
@@ -1085,8 +1127,8 @@ setExpandedProductId(null);
   product: ProductView
 ) {
   const confirmed = window.confirm(
-    `Deactivate "${product.name}"?\n\n` +
-      'It will disappear from the POS and product list, but historical sales will remain.'
+    `Move "${product.name}" to Recently deleted?\n\n` +
+      'It will disappear from the POS and product list. You can restore it from Recently deleted. Historical sales stay.'
   );
 
     if (!confirmed) return;
@@ -1097,7 +1139,7 @@ setExpandedProductId(null);
       );
 
       toast(
-        'Product removed successfully.',
+        'Product moved to Recently deleted.',
         'success'
       );
 
@@ -1107,6 +1149,29 @@ setExpandedProductId(null);
         error instanceof Error
           ? error.message
           : 'Failed to remove product.',
+        'error'
+      );
+    }
+  }
+
+  async function restoreDeletedProduct(product: ApiDeletedProduct) {
+    try {
+      await api.post<{ message: string }>(
+        `/api/products/${product.id}/restore`
+      );
+
+      toast(
+        `"${product.name}" was restored to the catalog.`,
+        'success'
+      );
+
+      setListView('catalog');
+      await loadData();
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : 'Failed to restore product.',
         'error'
       );
     }
@@ -1349,7 +1414,11 @@ function printBarcodeLabel({
     <div className="space-y-6">
       <PageHeader
         title="Products"
-        subtitle={`${products.length} products in catalog`}
+        subtitle={
+          listView === 'deleted'
+            ? `${deletedProducts.length} product${deletedProducts.length === 1 ? '' : 's'} in Recently deleted`
+            : `${products.length} products in catalog`
+        }
         actions={
           <div className="flex items-center gap-2">
             <Button
@@ -1366,6 +1435,7 @@ function printBarcodeLabel({
               Refresh
             </Button>
 
+            {listView === 'catalog' && (
             <Button
               leftIcon={
                 <Plus className="h-4 w-4" />
@@ -1374,6 +1444,7 @@ function printBarcodeLabel({
             >
               Add Product
             </Button>
+            )}
           </div>
         }
       />
@@ -1435,9 +1506,24 @@ function printBarcodeLabel({
           </option>
         </select>
 
+        <Button
+          variant={listView === 'deleted' ? 'secondary' : 'outline'}
+          size="sm"
+          leftIcon={<Trash2 className="h-4 w-4" />}
+          onClick={() =>
+            setListView((current) =>
+              current === 'deleted' ? 'catalog' : 'deleted'
+            )
+          }
+        >
+          Recently deleted
+          {deletedProducts.length > 0 ? ` (${deletedProducts.length})` : ''}
+        </Button>
+
         <span className="text-sm text-slate-500 ml-auto">
-          {filtered.length} result
-          {filtered.length !== 1 ? 's' : ''}
+          {listView === 'deleted'
+            ? `${deletedFiltered.length} deleted`
+            : `${filtered.length} result${filtered.length !== 1 ? 's' : ''}`}
         </span>
       </div>
 
@@ -1452,6 +1538,111 @@ function printBarcodeLabel({
             </p>
           </div>
         </Card>
+      ) : listView === 'deleted' ? (
+        deletedFiltered.length === 0 ? (
+          <Card>
+            <EmptyState
+              icon={<Trash2 className="h-8 w-8" />}
+              title={
+                deletedProducts.length === 0
+                  ? 'Recently deleted is empty'
+                  : 'No matching deleted products'
+              }
+              description={
+                deletedProducts.length === 0
+                  ? 'Deleted products appear here so you can restore them.'
+                  : 'Try a different search.'
+              }
+              action={
+                deletedProducts.length === 0 ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => setListView('catalog')}
+                  >
+                    Back to catalog
+                  </Button>
+                ) : undefined
+              }
+            />
+          </Card>
+        ) : (
+          <DataTable
+            data={deletedFiltered}
+            rowKey={(product) => String(product.id)}
+            minWidth="800px"
+            columns={[
+              {
+                key: 'product',
+                header: 'Product',
+                render: (product) => (
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-slate-900">
+                      {product.name}
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      {Number(product.variant_count ?? 0) > 0
+                        ? `${product.variant_count} variants kept`
+                        : 'No variants'}
+                    </p>
+                  </div>
+                ),
+              },
+              {
+                key: 'sku',
+                header: 'SKU',
+                width: '180px',
+                render: (product) => (
+                  <span className="font-mono text-sm text-slate-600">
+                    {product.sku}
+                  </span>
+                ),
+              },
+              {
+                key: 'category',
+                header: 'Category',
+                width: '160px',
+                render: (product) => (
+                  <span className="text-sm text-slate-600">
+                    {product.category_name || 'No category'}
+                  </span>
+                ),
+              },
+              {
+                key: 'deleted',
+                header: 'Deleted',
+                width: '200px',
+                render: (product) => (
+                  <div>
+                    <p className="text-sm text-slate-700">
+                      {formatDeletedAt(product.deleted_at)}
+                    </p>
+                    {product.deleted_by_username && (
+                      <p className="text-xs text-slate-400">
+                        by {product.deleted_by_username}
+                      </p>
+                    )}
+                  </div>
+                ),
+              },
+              {
+                key: 'actions',
+                header: 'Actions',
+                width: '140px',
+                align: 'right',
+                render: (product) => (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+                    onClick={() => restoreDeletedProduct(product)}
+                  >
+                    Restore
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        )
       ) : filtered.length === 0 ? (
         <Card>
           <EmptyState
@@ -1504,106 +1695,89 @@ function printBarcodeLabel({
           rowKey={(product) => product.id}
           minWidth="1000px"
           isRowExpanded={(product) =>
-  expandedProductId === product.id
-}
+            expandedProductId === product.id
+          }
+          renderExpandedRow={(product) => {
+            const rows = productVariants[product.id];
 
-renderExpandedRow={(product) => {
-  const rows = productVariants[product.id];
+            if (!rows) {
+              return (
+                <tr className="bg-slate-50/80">
+                  <td
+                    colSpan={7}
+                    className="px-4 py-2 pl-14 text-xs text-slate-400"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Loading variants...
+                    </span>
+                  </td>
+                </tr>
+              );
+            }
 
-  if (!rows) {
-    return (
-      <div className="flex items-center justify-center py-4 text-sm text-slate-400">
-        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-        Loading variants...
-      </div>
-    );
-  }
+            return (
+              <>
+                {rows.map((variant) => {
+                  const stock = Number(variant.stock_quantity ?? 0);
+                  const lowStock = Number(
+                    variant.low_stock_threshold ?? 2
+                  );
+                  const status = getStockStatus({
+                    stock,
+                    reorderLevel: lowStock,
+                  });
 
-  return (
-  <div className="bg-slate-50/70 px-4 py-3">
-  <div className="w-full space-y-2">
-      {rows.map((variant) => {
-        const stock = Number(
-          variant.stock_quantity ?? 0
-        );
-
-        const lowStock = Number(
-          variant.low_stock_threshold ?? 2
-        );
-
-        return (
-          <div
-            key={String(variant.id)}
-            className="flex items-center rounded-lg border border-slate-200 bg-white px-4 py-3"
-          >
-            {/* Variant */}
-            <div className="flex w-[220px] shrink-0 items-center gap-3 lg:w-auto lg:min-w-[260px] lg:flex-1">
-              <div className="h-6 w-6 border-b border-l border-slate-300" />
-
-              <div>
-                <p className="text-sm font-semibold capitalize text-slate-800">
-                  {variant.name}
-                </p>
-
-                <p className="text-xs text-slate-400">
-                  Variant
-                </p>
-              </div>
-            </div>
-
-            {/* Stock */}
-            <div className="w-[120px] shrink-0 text-center">
-              <p className="mb-1 text-[11px] text-slate-400">
-                Stock
-              </p>
-
-              <span
-                className={`inline-flex min-w-9 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
-                  stock === 0
-                    ? 'bg-danger-50 text-danger-700'
-                    : stock <= lowStock
-                    ? 'bg-warning-50 text-warning-700'
-                    : 'bg-success-50 text-success-700'
-                }`}
-              >
-                {stock}
-              </span>
-            </div>
-
-            {/* SKU */}
-            <div className="w-[220px] shrink-0">
-              <p className="mb-1 text-[11px] text-slate-400">
-                SKU
-              </p>
-
-              <p className="font-mono text-xs font-medium text-slate-700">
-                {variant.sku}
-              </p>
-            </div>
-
-            {/* Barcode */}
-            <div className="w-[60px] shrink-0 text-right">
-              <button
-                type="button"
-                onClick={() =>
-                  openVariantBarcode(
-                    product,
-                    variant
-                  )
-                }
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-brand-50 hover:text-brand-600"
-                title={`Barcode for ${variant.name}`}
-              >
-                <Barcode className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  </div>
-);
-}}
+                  return (
+                    <tr
+                      key={String(variant.id)}
+                      className="bg-slate-50/80"
+                    >
+                      <td className="px-4 py-2 align-middle text-sm text-slate-700">
+                        <div className="flex items-center gap-3 pl-10">
+                          <span className="truncate font-medium text-slate-800">
+                            {variant.name}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2" />
+                      <td className="px-4 py-2" />
+                      <td className="px-4 py-2 text-center align-middle text-sm text-slate-700">
+                        <span className="font-semibold tabular-nums">
+                          {stock}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 align-middle">
+                        <StockStatusBadge status={status} />
+                      </td>
+                      <td className="px-4 py-2 align-middle">
+                        <span className="whitespace-nowrap font-mono text-sm font-medium text-slate-600">
+                          {variant.sku}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-right align-middle">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openVariantBarcode(product, variant)
+                          }
+                          className="
+                            inline-flex h-8 w-8
+                            items-center justify-center
+                            rounded-lg text-slate-400
+                            hover:bg-slate-100 hover:text-slate-700
+                          "
+                          title={`Barcode for ${variant.name}`}
+                        >
+                          <Barcode className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </>
+            );
+          }}
          columns={[
   {
     key: 'product',
