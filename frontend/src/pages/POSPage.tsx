@@ -54,6 +54,7 @@ import { useAuth } from '@/context/AuthContext';
 
 import {
   formatCurrency,
+  taxOnNet,
 } from '@/lib/currency';
 
 import { api } from '@/lib/api';
@@ -494,6 +495,11 @@ const [
 );
 
 const [
+  taxRate,
+  setTaxRate,
+] = useState(0);
+
+const [
   paymentMethod,
   setPaymentMethod,
 ] = useState<
@@ -678,6 +684,29 @@ const [
     loadPOSData();
   }, []);
 
+  useEffect(() => {
+    if (!checkoutOpen) {
+      return;
+    }
+
+    api
+      .get<{ taxRate: number }>(
+        '/api/settings/store'
+      )
+      .then((settings) => {
+        const loadedTaxRate =
+          Number(settings.taxRate);
+
+        setTaxRate(
+          loadedTaxRate === 5 ||
+            loadedTaxRate === 10
+            ? loadedTaxRate
+            : 0
+        );
+      })
+      .catch(() => {});
+  }, [checkoutOpen]);
+
   async function loadPOSData() {
     setLoadingProducts(true);
 
@@ -686,6 +715,7 @@ const [
   productData,
   categoryData,
   customerData,
+  storeSettings,
 ] = await Promise.all([
   api.get<ApiProduct[]>(
     '/api/products'
@@ -698,6 +728,10 @@ const [
   api.get<Customer[]>(
     '/api/customers'
   ),
+
+  api.get<{ taxRate: number }>(
+    '/api/settings/store'
+  ).catch(() => ({ taxRate: 0 })),
 ]);
 
       setProducts(
@@ -706,6 +740,16 @@ const [
         )
       );
       setCustomers(customerData);
+
+      const loadedTaxRate =
+        Number(storeSettings.taxRate);
+
+      setTaxRate(
+        loadedTaxRate === 5 ||
+          loadedTaxRate === 10
+          ? loadedTaxRate
+          : 0
+      );
 
       setCategories([
         {
@@ -799,10 +843,17 @@ const [
     0
   );
 
-  const total = Math.max(
+  const netAfterDiscount = Math.max(
     0,
     subtotal - discount
   );
+
+  const taxAmount = taxOnNet(
+    netAfterDiscount,
+    taxRate
+  );
+
+  const total = netAfterDiscount + taxAmount;
 
   const totalItems =
     cart.reduce(
@@ -1687,6 +1738,7 @@ idempotency_key:
           user_id: number | string;
           subtotal: number | string;
           discount: number | string;
+          tax: number | string;
           total: number | string;
           payment_method:
             Sale['paymentMethod'];
@@ -1785,6 +1837,11 @@ idempotency_key:
       discount:
         Number(
           result.sale.discount
+        ),
+
+      tax:
+        Number(
+          result.sale.tax ?? 0
         ),
 
       total:
@@ -2339,6 +2396,8 @@ const scannedProductAvailable =
   subtotal={subtotal}
   discount={discount}
   discountPercent={discountPercent}
+  taxRate={taxRate}
+  taxAmount={taxAmount}
   total={total}
   totalItems={totalItems}
       onUpdateQty={updateQty}
@@ -2482,6 +2541,8 @@ const scannedProductAvailable =
                 discount
               }
               discountPercent={discountPercent}
+              taxRate={taxRate}
+              taxAmount={taxAmount}
               total={total}
               totalItems={
                 totalItems
@@ -3736,6 +3797,18 @@ const scannedProductAvailable =
         </span>
       </div>
 
+      {taxRate > 0 && (
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-slate-500">
+            Tax ({taxRate}%)
+          </span>
+
+          <span className="font-semibold text-slate-900 tabular-nums">
+            {formatCurrency(taxAmount)}
+          </span>
+        </div>
+      )}
+
       <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-3">
         <span className="text-base font-bold text-slate-900">
           Total
@@ -4072,6 +4145,20 @@ const scannedProductAvailable =
           </div>
         )}
 
+        {(lastSale.tax ?? 0) > 0 && (
+          <div className="mt-2 flex items-center justify-between text-sm">
+            <span className="text-slate-500">
+              Tax
+            </span>
+
+            <span className="font-semibold text-slate-900 tabular-nums">
+              {formatCurrency(
+                lastSale.tax ?? 0
+              )}
+            </span>
+          </div>
+        )}
+
         <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-3">
 
           <span className="font-bold text-slate-900">
@@ -4111,6 +4198,8 @@ interface CartPanelProps {
   subtotal: number;
   discount: number;
   discountPercent: number;
+  taxRate: number;
+  taxAmount: number;
   total: number;
   totalItems: number;
 
@@ -4135,6 +4224,8 @@ function CartPanel({
   subtotal,
   discount,
   discountPercent,
+  taxRate,
+  taxAmount,
   total,
   totalItems,
   onUpdateQty,
@@ -4371,6 +4462,18 @@ function CartPanel({
 </span>
 
             </div>
+
+            {taxRate > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-500">
+                  Tax ({taxRate}%)
+                </span>
+
+                <span className="font-semibold text-slate-900 tabular-nums">
+                  {formatCurrency(taxAmount)}
+                </span>
+              </div>
+            )}
 
             <div className="flex justify-between items-center pt-2 border-t border-slate-100">
 

@@ -65,6 +65,8 @@ export interface Sale {
 
   discount: number;
 
+  tax?: number;
+
   total: number;
 
   status: SaleStatus;

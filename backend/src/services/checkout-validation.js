@@ -324,8 +324,49 @@ function assertDiscountWithinSubtotal(discountMinorUnits, subtotalMinorUnits) {
   }
 }
 
+const ALLOWED_STORE_TAX_RATES = Object.freeze([0, 5, 10]);
+
+function parseStoreTaxRatePercent(value) {
+  const hundredths = decimalParts(value, 'tax_rate');
+  if (hundredths % 100 !== 0) {
+    throw new CheckoutValidationError('Store tax rate is invalid');
+  }
+
+  const percent = hundredths / 100;
+  if (!ALLOWED_STORE_TAX_RATES.includes(percent)) {
+    throw new CheckoutValidationError('Store tax rate is invalid');
+  }
+
+  return percent;
+}
+
+function taxMinorUnitsOnNet(netMinorUnits, taxRatePercent) {
+  if (!Number.isSafeInteger(netMinorUnits) || netMinorUnits < 0) {
+    throw new CheckoutValidationError('Taxable amount exceeds the supported monetary range');
+  }
+
+  assertNumericRange(netMinorUnits, 'taxable amount');
+
+  if (!ALLOWED_STORE_TAX_RATES.includes(taxRatePercent)) {
+    throw new CheckoutValidationError('Store tax rate is invalid');
+  }
+
+  if (taxRatePercent === 0 || netMinorUnits === 0) {
+    return 0;
+  }
+
+  const rateHundredths = taxRatePercent * 100;
+  const product = netMinorUnits * rateHundredths;
+  if (!Number.isSafeInteger(product)) {
+    throw new CheckoutValidationError('Tax exceeds safe arithmetic range');
+  }
+
+  return assertNumericRange(Math.round(product / 10000), 'tax');
+}
+
 module.exports = {
   ALLOWED_PAYMENT_METHODS,
+  ALLOWED_STORE_TAX_RATES,
   CheckoutValidationError,
   MAX_CHECKOUT_LINES,
   POSTGRES_INTEGER_MAX,
@@ -346,6 +387,8 @@ module.exports = {
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,
   normalizeRequiredInteger,
+  parseStoreTaxRatePercent,
   resolveCheckoutCustomerSnapshot,
+  taxMinorUnitsOnNet,
   validateCheckoutRequest,
 };

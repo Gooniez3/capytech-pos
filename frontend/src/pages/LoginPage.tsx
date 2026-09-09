@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import {
+  useEffect,
+  useState,
+} from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -15,53 +18,93 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 
 export function LoginPage() {
-  const { login, loading } = useAuth();
+  const { login, completeSetup, loading } = useAuth();
   const { toast } = useToast();
   const navigate = useNavigate();
 
-  const [username, setUsername] =
-    useState('');
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(
+    null
+  );
 
-  const [password, setPassword] =
-    useState('');
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
 
-  const [
-    showPassword,
-    setShowPassword,
-  ] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
+  const [error, setError] = useState('');
 
-  const [error, setError] =
-    useState('');
+  useEffect(() => {
+    let cancelled = false;
 
-  async function handleSubmit(
-    e: React.FormEvent
-  ) {
+    fetch('/api/auth/setup-status')
+      .then(async (response) => {
+        const data = await response.json();
+        if (!cancelled) {
+          setNeedsSetup(Boolean(data.needsSetup));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNeedsSetup(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-
     setError('');
 
-    if (
-      !username.trim() ||
-      !password
-    ) {
-      setError(
-        'Please enter your username and password.'
-      );
+    if (needsSetup) {
+      if (!name.trim() || !username.trim() || !password) {
+        setError('Please fill in your name, username, and password.');
+        return;
+      }
+
+      if (password.length < 8) {
+        setError('Password must be at least 8 characters.');
+        return;
+      }
+
+      if (password !== confirmPassword) {
+        setError('The two passwords do not match.');
+        return;
+      }
+
+      try {
+        const user = await completeSetup({
+          name,
+          username,
+          password,
+        });
+
+        toast(`Welcome, ${user.name}. Your shop is ready.`, 'success');
+        navigate('/dashboard');
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Could not create your account.'
+        );
+      }
 
       return;
     }
 
+    if (!username.trim() || !password) {
+      setError('Please enter your username and password.');
+      return;
+    }
+
     try {
-      const user = await login(
-        username,
-        password
-      );
+      const user = await login(username, password, rememberMe);
 
-      toast(
-        `Welcome back, ${user.name}!`,
-        'success'
-      );
-
+      toast(`Welcome back, ${user.name}!`, 'success');
       navigate('/dashboard');
     } catch (err) {
       setError(
@@ -468,7 +511,9 @@ export function LoginPage() {
               sm:text-2xl
             "
           >
-            Sign in to your account
+            {needsSetup
+              ? 'Create your shop account'
+              : 'Sign in to your account'}
           </h2>
 
           <p
@@ -479,8 +524,9 @@ export function LoginPage() {
               text-slate-500
             "
           >
-            Enter your credentials to access
-            the dashboard.
+            {needsSetup
+              ? 'Choose a username and password only you know. You will use this every day to open the till.'
+              : 'Enter your credentials to access the dashboard.'}
           </p>
 
           {/* =====================================================
@@ -497,19 +543,29 @@ export function LoginPage() {
           >
             {/* Username */}
 
+            {needsSetup && (
+              <Input
+                label="Your name"
+                name="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Aung Aung"
+                leftIcon={<User className="h-4 w-4" />}
+                autoComplete="name"
+              />
+            )}
+
             <Input
               label="Username"
               name="username"
               value={username}
-              onChange={(e) =>
-                setUsername(
-                  e.target.value
-                )
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={
+                needsSetup
+                  ? 'Choose a username'
+                  : 'Enter your username'
               }
-              placeholder="Enter your username"
-              leftIcon={
-                <User className="h-4 w-4" />
-              }
+              leftIcon={<User className="h-4 w-4" />}
               autoComplete="username"
             />
 
@@ -529,7 +585,11 @@ export function LoginPage() {
                   e.target.value
                 )
               }
-              placeholder="Enter your password"
+              placeholder={
+                needsSetup
+                  ? 'At least 8 characters'
+                  : 'Enter your password'
+              }
               leftIcon={
                 <Lock className="h-4 w-4" />
               }
@@ -560,8 +620,25 @@ export function LoginPage() {
                   )}
                 </button>
               }
-              autoComplete="current-password"
+              autoComplete={
+                needsSetup
+                  ? 'new-password'
+                  : 'current-password'
+              }
             />
+
+            {needsSetup && (
+              <Input
+                label="Confirm password"
+                name="confirmPassword"
+                type={showPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Type the same password again"
+                leftIcon={<Lock className="h-4 w-4" />}
+                autoComplete="new-password"
+              />
+            )}
 
             {/* Error */}
 
@@ -587,15 +664,8 @@ export function LoginPage() {
                 REMEMBER / FORGOT
                 ================================================= */}
 
-            <div
-              className="
-                flex
-                items-center
-                justify-between
-                gap-4
-                text-sm
-              "
-            >
+            {!needsSetup && (
+            <div className="text-sm">
               <label
                 className="
                   flex
@@ -607,6 +677,10 @@ export function LoginPage() {
               >
                 <input
                   type="checkbox"
+                  checked={rememberMe}
+                  onChange={(event) =>
+                    setRememberMe(event.target.checked)
+                  }
                   className="
                     rounded
                     border-slate-300
@@ -616,23 +690,11 @@ export function LoginPage() {
                 />
 
                 <span>
-                  Remember me
+                  Remember me on this computer (30 days)
                 </span>
               </label>
-
-              <button
-                type="button"
-                className="
-                  whitespace-nowrap
-                  font-semibold
-                  text-brand-600
-                  transition-colors
-                  hover:text-brand-700
-                "
-              >
-                Forgot password?
-              </button>
             </div>
+            )}
 
             {/* =================================================
                 SIGN IN
@@ -644,7 +706,7 @@ export function LoginPage() {
               size="lg"
               loading={loading}
             >
-              Sign In
+              {needsSetup ? 'Create account' : 'Sign In'}
             </Button>
           </form>
         </div>

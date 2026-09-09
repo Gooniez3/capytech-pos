@@ -18,7 +18,9 @@ const {
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,
   normalizeRequiredInteger,
+  parseStoreTaxRatePercent,
   resolveCheckoutCustomerSnapshot,
+  taxMinorUnitsOnNet,
   validateCheckoutRequest,
 } = require('./checkout-validation');
 
@@ -270,4 +272,25 @@ test('checkout without a customer keeps the submitted walk-in snapshot', () => {
     email: null,
     address: null,
   });
+});
+
+test('store tax rate accepts 0, 5, and 10 percent', () => {
+  assert.equal(parseStoreTaxRatePercent(0), 0);
+  assert.equal(parseStoreTaxRatePercent('5.00'), 5);
+  assert.equal(parseStoreTaxRatePercent(10), 10);
+});
+
+for (const value of [7, '7.50', 15, -1, 'abc']) {
+  test(`store tax rate rejects ${String(value)}`, () => {
+    assert.throws(() => parseStoreTaxRatePercent(value), /tax rate is invalid|two decimal places|valid monetary amount/);
+  });
+}
+
+test('tax on net uses integer rounding after discount', () => {
+  assert.equal(taxMinorUnitsOnNet(0, 5), 0);
+  assert.equal(taxMinorUnitsOnNet(10000, 0), 0);
+  assert.equal(taxMinorUnitsOnNet(10000, 5), 500);
+  assert.equal(taxMinorUnitsOnNet(1025, 5), 51);
+  assert.equal(taxMinorUnitsOnNet(1025, 10), 103);
+  assert.equal(taxMinorUnitsOnNet(2070000, 5), 103500);
 });

@@ -94,6 +94,9 @@ const [storeAddress, setStoreAddress] = useState('');
 const [storeCurrency, setStoreCurrency] =
   useState<'ks' | 'usd'>('ks');
 
+const [storeTaxRate, setStoreTaxRate] =
+  useState(0);
+
 const [loadingStore, setLoadingStore] =
   useState(true);
 
@@ -174,6 +177,16 @@ const [
 
       setStoreCurrency(
         settings.currency ?? 'ks'
+      );
+
+      const loadedTaxRate =
+        Number(settings.taxRate);
+
+      setStoreTaxRate(
+        loadedTaxRate === 5 ||
+          loadedTaxRate === 10
+          ? loadedTaxRate
+          : 0
       );
     } catch (error) {
       toast(
@@ -283,7 +296,7 @@ useEffect(() => {
     return;
   }
 
-  const taxRate = 0;
+  const taxRate = storeTaxRate;
 
   try {
     setSavingStore(true);
@@ -306,6 +319,12 @@ useEffect(() => {
     setStoreEmail(updated.email ?? '');
     setStoreAddress(updated.address ?? '');
     setStoreCurrency(updated.currency ?? 'ks');
+    setStoreTaxRate(
+      updated.taxRate === 5 ||
+        updated.taxRate === 10
+        ? updated.taxRate
+        : 0
+    );
 
     toast(
       'Store information updated successfully.',
@@ -820,7 +839,7 @@ async function handlePasswordChange() {
             </select>
           </div>
 
-          {/* Tax is not charged at checkout */}
+          {/* Tax is added after discount at checkout */}
 
           <div>
             <label className="mb-1.5 block text-sm font-semibold text-slate-700">
@@ -828,29 +847,43 @@ async function handlePasswordChange() {
             </label>
 
             <select
-              value="0"
-              disabled
+              value={String(storeTaxRate)}
+              onChange={(event) => {
+                const nextRate = Number(event.target.value);
+                setStoreTaxRate(
+                  nextRate === 5 || nextRate === 10 ? nextRate : 0
+                );
+              }}
               className="
                 h-10
                 w-full
-                cursor-not-allowed
                 rounded-lg
                 border
                 border-slate-300
-                bg-slate-50
+                bg-white
                 px-3
                 text-sm
-                text-slate-500
+                text-slate-900
                 outline-none
+                transition
+                focus:border-brand-500
+                focus:ring-2
+                focus:ring-brand-500/20
               "
             >
               <option value="0">
                 No Tax (0%)
               </option>
+              <option value="5">
+                5%
+              </option>
+              <option value="10">
+                10%
+              </option>
             </select>
 
             <p className="mt-1.5 text-xs text-slate-500">
-              Checkout does not add tax. This stays at 0% so receipts match what the customer paid.
+              Tax is added after discount. The till reads this rate from the server, not the cashier screen. Old sales stay at 0%.
             </p>
           </div>
 

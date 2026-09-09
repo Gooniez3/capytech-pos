@@ -199,22 +199,23 @@ router.put(
       });
     }
 
+    const allowedTaxRates = [0, 5, 10];
+
     if (
       !Number.isFinite(
         taxRate
       ) ||
-      taxRate < 0 ||
-      taxRate > 100
+      !allowedTaxRates.includes(
+        taxRate
+      )
     ) {
       return res.status(400).json({
         error:
-          'Tax rate must be between 0 and 100',
+          'Tax rate must be 0%, 5%, or 10%',
       });
     }
 
-    // Checkout does not charge tax. Keep 0 so Settings cannot
-    // show a rate the till will never collect.
-    const storedTaxRate = 0;
+    const storedTaxRate = taxRate;
 
     try {
       const result =

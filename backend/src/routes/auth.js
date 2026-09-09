@@ -24,6 +24,30 @@ const loginLimiter = rateLimit({
   },
 });
 
+function signUserToken(user, rememberMe = false) {
+  return jwt.sign(
+    {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+    },
+    process.env.JWT_SECRET,
+    {
+      // Shop till stays signed in overnight when Remember me is on.
+      expiresIn: rememberMe ? '30d' : '12h',
+    }
+  );
+}
+
+function userPayload(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    role: user.role,
+  };
+}
+
 /* =========================================================
    POST /api/auth/login
    ========================================================= */
@@ -35,6 +59,7 @@ router.post(
     const {
       username,
       password,
+      rememberMe,
     } = req.body;
 
     if (
@@ -87,43 +112,9 @@ router.post(
           });
       }
 
-      const token =
-        jwt.sign(
-          {
-            id:
-              user.id,
-
-            username:
-              user.username,
-
-            role:
-              user.role,
-          },
-
-          process.env.JWT_SECRET,
-
-          {
-            expiresIn:
-              '12h',
-          }
-        );
-
       res.json({
-        token,
-
-        user: {
-          id:
-            user.id,
-
-          name:
-            user.name,
-
-          username:
-            user.username,
-
-          role:
-            user.role,
-        },
+        token: signUserToken(user, Boolean(rememberMe)),
+        user: userPayload(user),
       });
     } catch (err) {
       console.error(
@@ -137,6 +128,111 @@ router.post(
           error:
             'Server error',
         });
+    }
+  }
+);
+
+/* =========================================================
+   GET /api/auth/setup-status
+   First shop owner creates their own login when no users exist.
+   ========================================================= */
+
+router.get(
+  '/setup-status',
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        'SELECT COUNT(*)::int AS count FROM users'
+      );
+
+      res.json({
+        needsSetup: result.rows[0].count === 0,
+      });
+    } catch (err) {
+      console.error('Setup status error:', err);
+      res.status(500).json({
+        error: 'Server error',
+      });
+    }
+  }
+);
+
+router.post(
+  '/setup',
+  loginLimiter,
+  async (req, res) => {
+    const name = String(req.body?.name || '').trim();
+    const username = String(req.body?.username || '').trim();
+    const password = String(req.body?.password || '');
+
+    if (!name || !username || !password) {
+      return res.status(400).json({
+        error: 'Name, username, and password are required',
+      });
+    }
+
+    if (username.length < 3 || username.length > 50) {
+      return res.status(400).json({
+        error: 'Username must be between 3 and 50 characters',
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters',
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await client.query('LOCK TABLE users IN EXCLUSIVE MODE');
+
+      const existing = await client.query(
+        'SELECT COUNT(*)::int AS count FROM users'
+      );
+
+      if (existing.rows[0].count > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'The shop already has an owner account. Sign in instead.',
+        });
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+      const created = await client.query(
+        `
+          INSERT INTO users (name, username, password_hash, role)
+          VALUES ($1, $2, $3, 'admin')
+          RETURNING id, name, username, role
+        `,
+        [name, username, passwordHash]
+      );
+
+      await client.query('COMMIT');
+
+      const user = created.rows[0];
+
+      res.status(201).json({
+        token: signUserToken(user, true),
+        user: userPayload(user),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+
+      if (err.code === '23505') {
+        return res.status(409).json({
+          error: 'That username is already taken',
+        });
+      }
+
+      console.error('Setup error:', err);
+      res.status(500).json({
+        error: 'Failed to create the owner account',
+      });
+    } finally {
+      client.release();
     }
   }
 );

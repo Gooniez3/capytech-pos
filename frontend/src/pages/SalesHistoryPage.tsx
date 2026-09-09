@@ -93,6 +93,9 @@ interface ApiSale {
   discount:
     number | string;
 
+  tax?:
+    number | string;
+
   total:
     number | string;
 
@@ -281,6 +284,11 @@ const [
             discount:
               Number(
                 sale.discount
+              ),
+
+            tax:
+              Number(
+                sale.tax ?? 0
               ),
 
             total:
@@ -1318,6 +1326,22 @@ refundedBy:
                 </span>
 
               </div>
+
+              {(viewSale.tax ?? 0) > 0 && (
+                <div className="flex justify-between text-sm">
+
+                  <span className="text-slate-500">
+                    Tax
+                  </span>
+
+                  <span className="font-semibold tabular-nums text-slate-900">
+                    {formatCurrency(
+                      viewSale.tax ?? 0
+                    )}
+                  </span>
+
+                </div>
+              )}
 
               <div className="flex justify-between border-t border-slate-200 pt-2">
 

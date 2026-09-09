@@ -14,11 +14,14 @@ const {
 const {
   CheckoutValidationError,
   assertDiscountWithinSubtotal,
+  assertNumericRange,
   authoritativeDecimalToMinorUnits,
   checkedLineTotal,
   checkedSubtotal,
   minorUnitsToDatabaseDecimal,
+  parseStoreTaxRatePercent,
   resolveCheckoutCustomerSnapshot,
+  taxMinorUnitsOnNet,
   validateCheckoutRequest,
 } = require('../services/checkout-validation');
 
@@ -593,9 +596,33 @@ continue;
 
     assertDiscountWithinSubtotal(discountMinorUnits, subtotalMinorUnits);
 
-    const totalMinorUnits = subtotalMinorUnits - discountMinorUnits;
+    const settingsResult = await client.query(
+      `
+        SELECT tax_rate
+        FROM store_settings
+        WHERE id = 1
+        FOR SHARE
+      `
+    );
+
+    if (!settingsResult.rows[0]) {
+      throw new CheckoutValidationError('Store settings not found');
+    }
+
+    const taxRatePercent = parseStoreTaxRatePercent(settingsResult.rows[0].tax_rate);
+    const netMinorUnits = subtotalMinorUnits - discountMinorUnits;
+    const taxMinorUnits = taxMinorUnitsOnNet(netMinorUnits, taxRatePercent);
+    const totalMinorUnits = netMinorUnits + taxMinorUnits;
+
+    if (!Number.isSafeInteger(totalMinorUnits)) {
+      throw new CheckoutValidationError('Total exceeds safe arithmetic range');
+    }
+
+    assertNumericRange(totalMinorUnits, 'total');
+
     const subtotal = minorUnitsToDatabaseDecimal(subtotalMinorUnits);
     const discountAmount = minorUnitsToDatabaseDecimal(discountMinorUnits);
+    const taxAmount = minorUnitsToDatabaseDecimal(taxMinorUnits);
     const total = minorUnitsToDatabaseDecimal(totalMinorUnits);
 
     /* All inventory and monetary validation is complete before this point. */
@@ -648,6 +675,7 @@ continue;
       customer_address,
       subtotal,
       discount,
+      tax,
       total,
       payment_method,
       idempotency_key,
@@ -657,7 +685,7 @@ continue;
       $1, $2, $3,
       $4, $5, $6, $7,
       $8, $9, $10, $11,
-      $12, $13
+      $12, $13, $14
     )
     RETURNING *
   `,
@@ -673,6 +701,7 @@ continue;
 
     subtotal,
     discountAmount,
+    taxAmount,
     total,
     paymentMethod,
 
@@ -1210,6 +1239,7 @@ router.get(
       s.invoice_number,
       s.subtotal,
       s.discount,
+      s.tax,
       s.total,
       s.payment_method,
       s.status,
@@ -1314,6 +1344,9 @@ subtotal:
 
         discount:
           Number(sale.discount),
+
+        tax:
+          Number(sale.tax ?? 0),
 
         total:
           Number(sale.total),

@@ -75,6 +75,7 @@ interface Summary {
   transactions: number;
   averageSale: number;
   discounts: number;
+  taxCollected: number;
   unitsSold: number;
   refundCount: number;
 }
@@ -362,9 +363,12 @@ const [
         ),
       ]);
 
-      setSummary(
-        summaryData
-      );
+      setSummary({
+        ...summaryData,
+        taxCollected: Number(
+          summaryData.taxCollected ?? 0
+        ),
+      });
 
       setTrend(
         trendData
@@ -553,6 +557,7 @@ const [
       ['Average Sale', summary.averageSale],
       ['Units Sold', summary.unitsSold],
       ['Discounts', summary.discounts],
+      ['Tax Collected', summary.taxCollected],
       ['Refund Count', summary.refundCount],
       ['Refund Amount', summary.refundAmount],
     ];
@@ -607,6 +612,7 @@ const [
         label === 'Gross Profit' ||
         label === 'Average Sale' ||
         label === 'Discounts' ||
+        label === 'Tax Collected' ||
         label === 'Refund Amount'
       ) {
         overview.getCell(
@@ -1501,6 +1507,16 @@ const [
 />
 
           <ReportMetric
+            label="Tax Collected"
+            value={formatCurrency(
+              summary.taxCollected
+            )}
+            icon={
+              <ReceiptText className="h-4 w-4" />
+            }
+          />
+
+          <ReportMetric
             label="COGS"
             value={formatCurrency(
               summary.cogs
@@ -1974,6 +1990,11 @@ const [
     <QualityMetric
       label="Discounts"
       value={formatCurrency(summary.discounts)}
+    />
+
+    <QualityMetric
+      label="Tax Collected"
+      value={formatCurrency(summary.taxCollected)}
     />
 
     <QualityMetric

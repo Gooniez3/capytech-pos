@@ -58,6 +58,11 @@ router.get(
         0
       ) AS gross_sales,
 
+      COALESCE(
+        SUM(COALESCE(tax, 0)),
+        0
+      ) AS gross_tax,
+
       COUNT(*) FILTER (
         WHERE status = 'completed'
       ) AS transactions,
@@ -124,7 +129,12 @@ router.get(
             COALESCE(
               SUM(total),
               0
-            ) AS refund_amount
+            ) AS refund_amount,
+
+            COALESCE(
+              SUM(COALESCE(tax, 0)),
+              0
+            ) AS refunded_tax
 
           FROM sales
 
@@ -182,6 +192,16 @@ router.get(
             .refund_amount
         );
 
+      const taxCollected =
+        Number(
+          salesResult.rows[0]
+            .gross_tax
+        ) -
+        Number(
+          refundResult.rows[0]
+            .refunded_tax
+        );
+
       const netSales =
         grossSales - refundAmount;
 
@@ -200,14 +220,17 @@ router.get(
       const cogs =
         grossCogs - refundedCogs;
 
+      const netOfTax =
+        netSales - taxCollected;
+
       const grossProfit =
-        netSales - cogs;
+        netOfTax - cogs;
 
       const grossMargin =
-        netSales !== 0
+        netOfTax !== 0
           ? (
               grossProfit /
-              netSales
+              netOfTax
             ) * 100
           : 0;
 
@@ -273,6 +296,8 @@ const refundRate =
               .discounts
           ),
 
+        taxCollected,
+
         unitsSold,
 
         refundCount,
@@ -331,7 +356,12 @@ router.get(
           COALESCE(
             SUM(total),
             0
-          ) AS gross_sales
+          ) AS gross_sales,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS gross_tax
 
         FROM sales
 
@@ -358,7 +388,12 @@ router.get(
           COALESCE(
             SUM(total),
             0
-          ) AS refund_amount
+          ) AS refund_amount,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS refunded_tax
 
         FROM sales
 
@@ -471,6 +506,18 @@ router.get(
         -
         (
           COALESCE(
+            gross_sales.gross_tax,
+            0
+          )
+          -
+          COALESCE(
+            refunds.refunded_tax,
+            0
+          )
+        )
+        -
+        (
+          COALESCE(
             gross_cogs.gross_cogs,
             0
           )
@@ -574,7 +621,12 @@ router.get(
           COALESCE(
             SUM(total),
             0
-          ) AS gross_sales
+          ) AS gross_sales,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS gross_tax
 
         FROM sales
 
@@ -599,7 +651,12 @@ router.get(
           COALESCE(
             SUM(total),
             0
-          ) AS refund_amount
+          ) AS refund_amount,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS refunded_tax
 
         FROM sales
 
@@ -709,6 +766,18 @@ router.get(
         -
         (
           COALESCE(
+            gross_sales.gross_tax,
+            0
+          )
+          -
+          COALESCE(
+            refunds.refunded_tax,
+            0
+          )
+        )
+        -
+        (
+          COALESCE(
             gross_cogs.gross_cogs,
             0
           )
@@ -805,7 +874,12 @@ if (range === 'month') {
           COALESCE(
             SUM(total),
             0
-          ) AS gross_sales
+          ) AS gross_sales,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS gross_tax
 
         FROM sales
 
@@ -830,7 +904,12 @@ if (range === 'month') {
           COALESCE(
             SUM(total),
             0
-          ) AS refund_amount
+          ) AS refund_amount,
+
+          COALESCE(
+            SUM(COALESCE(tax, 0)),
+            0
+          ) AS refunded_tax
 
         FROM sales
 
@@ -934,6 +1013,18 @@ if (range === 'month') {
           -
           COALESCE(
             refunds.refund_amount,
+            0
+          )
+        )
+        -
+        (
+          COALESCE(
+            gross_sales.gross_tax,
+            0
+          )
+          -
+          COALESCE(
+            refunds.refunded_tax,
             0
           )
         )
@@ -1044,7 +1135,12 @@ const result =
         COALESCE(
           SUM(total),
           0
-        ) AS gross_sales
+        ) AS gross_sales,
+
+        COALESCE(
+          SUM(COALESCE(tax, 0)),
+          0
+        ) AS gross_tax
 
       FROM sales
 
@@ -1084,7 +1180,12 @@ const result =
         COALESCE(
           SUM(total),
           0
-        ) AS refund_amount
+        ) AS refund_amount,
+
+        COALESCE(
+          SUM(COALESCE(tax, 0)),
+          0
+        ) AS refunded_tax
 
       FROM sales
 
@@ -1230,6 +1331,18 @@ const result =
         -
         COALESCE(
           refunds.refund_amount,
+          0
+        )
+      )
+      -
+      (
+        COALESCE(
+          gross_sales.gross_tax,
+          0
+        )
+        -
+        COALESCE(
+          refunds.refunded_tax,
           0
         )
       )

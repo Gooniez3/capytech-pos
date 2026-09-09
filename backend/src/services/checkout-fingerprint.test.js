@@ -325,6 +325,7 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
       if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
         return { rows: [{ count: 0 }] };
       }
+      if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: '0.00' }] };
       if (sql.includes('UPDATE products')) {
         return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
       }
@@ -380,6 +381,7 @@ test('duplicate checkout targets create one decrement and one sale item', async 
         }] };
       }
       if (sql.includes('COUNT(*)::integer AS count')) return { rows: [{ count: 0 }] };
+      if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: '0.00' }] };
       if (sql.includes('UPDATE products')) return { rowCount: 1, rows: [{ stock_quantity: 7 }] };
       if (sql.includes('nextval(')) return { rows: [{ invoice_number: '2' }] };
       if (sql.includes('INSERT INTO sales')) return { rows: [{ id: 52, invoice_number: 'INV-000002' }] };
@@ -562,7 +564,7 @@ test('pool connection failure returns a generic 500 without internal details', a
   });
 });
 
-function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61 } = {}) {
+function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61, taxRate = '0.00' } = {}) {
   const queries = [];
   const client = {
     async query(sql, values) {
@@ -585,6 +587,7 @@ function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61 }
       if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
         return { rows: [{ count: 0 }] };
       }
+      if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: taxRate }] };
       if (sql.includes('UPDATE products')) {
         return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
       }
@@ -748,6 +751,26 @@ test('all supported payment methods are stored on the sale', async () => {
       assert.equal(response.statusCode, 201);
     });
     const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
-    assert.equal(saleInsert.values[10], paymentMethod);
+    assert.equal(saleInsert.values[11], paymentMethod);
   }
+});
+
+test('checkout tax is taken from store_settings after discount and ignored from the client', async () => {
+  const { client, queries } = productSaleClient({ taxRate: '5.00' });
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = await postCheckout({
+      ...validCheckoutBody('c23e4567-e89b-42d3-a456-426614174000'),
+      discount: 10,
+      tax: 99,
+    });
+    assert.equal(response.statusCode, 201);
+  });
+
+  const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
+  assert.match(saleInsert.sql, /tax/);
+  assert.equal(saleInsert.values[7], '100.00');
+  assert.equal(saleInsert.values[8], '10.00');
+  assert.equal(saleInsert.values[9], '4.50');
+  assert.equal(saleInsert.values[10], '94.50');
 });

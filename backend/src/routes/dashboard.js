@@ -38,6 +38,15 @@ router.get('/', requireAuth, async (req, res) => {
           0
         ) AS today_revenue,
 
+        COALESCE(
+          SUM(COALESCE(tax, 0)) FILTER (
+            WHERE
+              status = 'completed'
+              AND created_at::date = CURRENT_DATE
+          ),
+          0
+        ) AS today_tax,
+
         COUNT(*) FILTER (
           WHERE
             status = 'completed'
@@ -49,6 +58,9 @@ router.get('/', requireAuth, async (req, res) => {
 
     const todayRevenue =
       Number(statsResult.rows[0].today_revenue);
+
+    const todayTax =
+      Number(statsResult.rows[0].today_tax);
 
     const transactions =
       Number(statsResult.rows[0].transactions);
@@ -93,13 +105,16 @@ router.get('/', requireAuth, async (req, res) => {
     const unitsSold =
       Number(profitResult.rows[0].units_sold);
 
-    // Net after discount: sales.total already subtracts discount.
+    // Tax is collected, not earned. Profit is net-of-tax revenue minus COGS.
+    const netOfTax =
+      todayRevenue - todayTax;
+
     const grossProfit =
-      todayRevenue - todayCogs;
+      netOfTax - todayCogs;
 
     const grossMargin =
-      todayRevenue > 0
-        ? (grossProfit / todayRevenue) * 100
+      netOfTax > 0
+        ? (grossProfit / netOfTax) * 100
         : 0;
 
     /* =====================================================
@@ -185,7 +200,9 @@ router.get('/', requireAuth, async (req, res) => {
         SELECT
           created_at::date AS day,
 
-          SUM(total) AS revenue
+          SUM(total) AS revenue,
+
+          SUM(COALESCE(tax, 0)) AS tax
 
         FROM sales
 
@@ -231,6 +248,11 @@ router.get('/', requireAuth, async (req, res) => {
 
         COALESCE(
           revenue.revenue,
+          0
+        )
+        -
+        COALESCE(
+          revenue.tax,
           0
         )
         -

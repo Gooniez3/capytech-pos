@@ -10,7 +10,16 @@ import type { User } from '@/types';
 
 interface AuthContextValue {
   user: User | null;
-  login: (username: string, password: string) => Promise<User>;
+  login: (
+    username: string,
+    password: string,
+    rememberMe?: boolean
+  ) => Promise<User>;
+  completeSetup: (details: {
+    name: string;
+    username: string;
+    password: string;
+  }) => Promise<User>;
   logout: () => void;
   updateUser: (user: User) => void;
   loading: boolean;
@@ -37,7 +46,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function login(
     username: string,
-    password: string
+    password: string,
+    rememberMe = true
   ): Promise<User> {
     setLoading(true);
 
@@ -50,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({
           username: username.trim(),
           password,
+          rememberMe,
         }),
       });
 
@@ -77,6 +88,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
 
       return loggedInUser;
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new Error(
+          'Cannot connect to the POS server. Make sure the backend is running.'
+        );
+      }
+
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function completeSetup(details: {
+    name: string;
+    username: string;
+    password: string;
+  }): Promise<User> {
+    setLoading(true);
+
+    try {
+      const response = await fetch(`${API_URL}/api/auth/setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: details.name.trim(),
+          username: details.username.trim(),
+          password: details.password,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Could not create the owner account');
+      }
+
+      const owner: User = {
+        ...data.user,
+        status: 'active',
+      };
+
+      setUser(owner);
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(owner));
+      localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+
+      return owner;
     } catch (error) {
       if (error instanceof TypeError) {
         throw new Error(
@@ -118,6 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   () => ({
     user,
     login,
+    completeSetup,
     logout,
     updateUser,
     loading,

@@ -20,3 +20,23 @@ export function parseCurrencyInput(text: string): number {
   const cleaned = text.replace(/[^\d]/g, '');
   return cleaned ? parseInt(cleaned, 10) : 0;
 }
+
+const ALLOWED_TAX_RATES = [0, 5, 10] as const;
+
+export function taxOnNet(
+  net: number,
+  taxRatePercent: number
+): number {
+  if (
+    net <= 0 ||
+    !ALLOWED_TAX_RATES.includes(
+      taxRatePercent as (typeof ALLOWED_TAX_RATES)[number]
+    )
+  ) {
+    return 0;
+  }
+
+  const netMinor = Math.round(net * 100);
+  const rateHundredths = taxRatePercent * 100;
+  return Math.round((netMinor * rateHundredths) / 10000) / 100;
+}

@@ -86,6 +86,8 @@ interface InvoiceData {
 
   discount: number;
 
+  tax: number;
+
   total: number;
 
   refundedAt:
@@ -184,9 +186,10 @@ export function InvoicePage() {
         ),
       ]);
 
-    setInvoice(
-      invoiceData
-    );
+    setInvoice({
+      ...invoiceData,
+      tax: Number(invoiceData.tax ?? 0),
+    });
 
     setStoreSettings(
       storeData
@@ -891,6 +894,22 @@ export function InvoicePage() {
               </span>
 
             </div>
+
+            {invoice.tax > 0 && (
+              <div className="flex items-center justify-between py-2 text-[14px]">
+
+                <span className="font-semibold text-slate-800">
+                  Tax
+                </span>
+
+                <span className="font-bold tabular-nums text-black">
+                  {formatCurrency(
+                    invoice.tax
+                  )}
+                </span>
+
+              </div>
+            )}
 
             <div
               className="
