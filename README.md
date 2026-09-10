@@ -46,20 +46,54 @@ CapyTech POS runs HTTPS on the shop PC (`https://localhost:5173`). PostgreSQL is
 
 ![CapyTech POS login](docs/screenshots/login.png)
 
-The till opens on HTTPS. Remember me keeps the counter signed in. If the database has no users yet, this screen becomes **Create your shop account** instead of Sign in.
+The till opens on HTTPS. Remember me keeps the counter signed in for 30 days. If the database has no users yet, this screen becomes **Create your shop account** instead of Sign in.
 
-### Counter and back office
+### Dashboard
 
-| Area | Role |
+![Store dashboard with today’s revenue, profit, and 7-day chart](docs/screenshots/dashboard.png)
+
+### Counter
+
+| Point of sale | Phone scanner |
 | --- | --- |
-| **POS** | Search, barcode, cart, discount, tax, charge, and invoice. |
-| **Products** | Catalog, variants, photos, barcodes, recycle bin. |
-| **Inventory** | Stock levels and value. |
-| **Sales** | Invoice history, refund, void. |
-| **Reports** | Gross, refunds, net, tax, COGS, profit, and product performance. |
-| **Settings** | Store name, address, tax rate (0 / 5 / 10%). |
+| ![POS product grid with photos, stock, and prices](docs/screenshots/pos.png) | ![QR pairing modal for the phone barcode scanner](docs/screenshots/scanner.png) |
 
-Tax is stored on each sale. Profit is **net of tax** (revenue − tax − COGS), including product-level reports, so VAT-style tax is not counted as margin.
+### Catalog
+
+| Products | Add product |
+| --- | --- |
+| ![Product list with variants, stock status, and SKUs](docs/screenshots/products.png) | ![Add product form with image, price, cost, and stock](docs/screenshots/add-product.png) |
+
+| Inventory | Barcode label |
+| --- | --- |
+| ![Inventory value, costs, and low-stock status](docs/screenshots/inventory.png) | ![Printable Code 128 barcode for a product SKU](docs/screenshots/barcode.png) |
+
+### Sales and invoices
+
+| Sales history | Printed invoice |
+| --- | --- |
+| ![Sales history with completed and refunded invoices](docs/screenshots/sales.png) | ![Invoice with tax, total, and store details](docs/screenshots/invoice.png) |
+
+### Reports
+
+![Last 30 days performance: gross, refunds, net, tax, COGS, and profit](docs/screenshots/reports.png)
+
+| Trend and product profit | Payments and refunds |
+| --- | --- |
+| ![Revenue, COGS, and profit chart with product performance](docs/screenshots/reports-trend.png) | ![KBZ Pay, cash, Wave Pay mix and refund analysis](docs/screenshots/reports-payments.png) |
+
+### Settings
+
+| Store | Notifications |
+| --- | --- |
+| ![Store name, address, currency, and tax rate](docs/screenshots/settings-store.png) | ![Low stock, refund, and daily summary alerts](docs/screenshots/settings-notifications.png) |
+
+<details>
+<summary><strong>What the numbers mean</strong></summary>
+
+Tax is stored on each sale. Shop profit is **net of tax** (revenue − tax − COGS). Product performance uses the same rule so tax is not counted as margin.
+
+</details>
 
 ## How it works
 
