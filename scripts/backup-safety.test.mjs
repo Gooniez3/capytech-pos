@@ -157,8 +157,9 @@ test('invoice print view renders warranty and keeps the admin editor off paper',
     'utf8'
   );
   assert.match(invoice, /Warranty/);
-  assert.match(invoice, /Warranty not recorded for this legacy invoice/);
-  assert.match(invoice, /warrantyLabel/);
+  assert.match(invoice, /invoiceWarrantyDisplay/);
+  assert.match(invoice, /invoice-warranty-panel/);
+  assert.match(invoice, /ShieldCheck/);
   assert.match(invoice, /print:hidden/);
   assert.match(invoice, /\/warranty/);
 });

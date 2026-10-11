@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   Printer,
   RefreshCw,
+  ShieldCheck,
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
@@ -17,6 +18,7 @@ import {
 } from '@/lib/currency';
 import {
   WARRANTY_OPTIONS,
+  invoiceWarrantyDisplay,
   warrantyLabel,
   type WarrantyMonths,
 } from '@/lib/warranty';
@@ -352,6 +354,11 @@ export function InvoicePage() {
           letter.toUpperCase()
       );
 
+  const warrantyDisplay =
+    invoiceWarrantyDisplay(
+      invoice.warrantyMonths
+    );
+
   /* =========================================================
      PAGE
      ========================================================= */
@@ -482,7 +489,6 @@ export function InvoicePage() {
         className="
   invoice-page
   mx-auto
-  min-h-[297mm]
   w-full
   max-w-[210mm]
   bg-white
@@ -1027,6 +1033,96 @@ export function InvoicePage() {
         </section>
 
         {/* ===================================================
+            SHOP WARRANTY
+            Uses only the value stored on this invoice.
+            =================================================== */}
+
+        <section
+          data-testid="invoice-warranty-panel"
+          className="
+            mt-4
+            break-inside-avoid
+            overflow-hidden
+            rounded-xl
+            border-2
+            border-slate-900
+            bg-slate-50
+            print:rounded-none
+            print:border-black
+            print:bg-white
+          "
+        >
+          <div
+            className="
+              flex
+              flex-col
+              gap-3
+              px-4
+              py-3.5
+              sm:flex-row
+              sm:items-center
+              sm:gap-4
+              print:flex-row
+              print:items-center
+              print:gap-4
+              print:px-4
+              print:py-3
+            "
+          >
+            <div
+              className="
+                flex
+                h-12
+                w-12
+                shrink-0
+                items-center
+                justify-center
+                rounded-full
+                border-2
+                border-slate-900
+                bg-slate-900
+                text-white
+                print:border-black
+                print:bg-white
+                print:text-black
+              "
+            >
+              <ShieldCheck
+                aria-hidden="true"
+                className="h-7 w-7"
+                strokeWidth={2.25}
+              />
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700 print:text-black">
+                Shop Warranty
+              </p>
+
+              <p
+                data-testid="invoice-warranty-duration"
+                className="mt-0.5 text-2xl font-black leading-none tracking-tight text-black sm:text-[28px] print:text-[25px]"
+              >
+                {warrantyDisplay.duration}
+              </p>
+
+              <p className="mt-1.5 text-[12px] font-semibold leading-4 text-slate-700 print:text-black">
+                {warrantyDisplay.detail}
+              </p>
+            </div>
+
+            <div className="border-t border-slate-400 pt-2 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0 print:border-l print:border-t-0 print:border-black print:pl-4 print:pt-0">
+              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-600 print:text-black">
+                Invoice reference
+              </p>
+              <p className="mt-0.5 whitespace-nowrap font-mono text-[12px] font-bold text-black">
+                {invoice.invoiceNumber}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* ===================================================
     REFUND INFORMATION
     =================================================== */}
 
@@ -1173,35 +1269,6 @@ export function InvoicePage() {
 )}
 
         {/* ===================================================
-            WARRANTY
-            =================================================== */}
-
-        <section
-          className="
-            mt-6
-            border-t
-            border-slate-400
-            pt-4
-          "
-        >
-
-          <p className="text-xs font-black uppercase tracking-[0.14em] text-black">
-            Warranty & Purchase Information
-          </p>
-
-          <p className="mt-3 max-w-[155mm] text-[13px] font-medium leading-5 text-slate-900">
-            {invoice.warrantyMonths === null
-              ? 'Warranty not recorded for this legacy invoice.'
-              : invoice.warrantyMonths === 0
-                ? 'No shop warranty was selected for this invoice.'
-                : `Shop warranty: ${warrantyLabel(invoice.warrantyMonths)} from the invoice date.`}
-            {' '}Please keep this invoice as proof of purchase for warranty,
-            return, exchange, or after-sales support.
-          </p>
-
-        </section>
-
-        {/* ===================================================
             FOOTER
             =================================================== */}
 
@@ -1261,7 +1328,7 @@ export function InvoicePage() {
             .invoice-page {
               width: 210mm !important;
 
-              min-height: 297mm !important;
+              min-height: auto !important;
 
               max-width: none !important;
 

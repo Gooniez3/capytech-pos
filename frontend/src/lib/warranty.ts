@@ -15,3 +15,43 @@ export function warrantyLabel(months: number | null): string {
   if (months === 0) return 'No warranty';
   return `${months} month${months === 1 ? '' : 's'}`;
 }
+
+export interface InvoiceWarrantyDisplay {
+  duration: string;
+  detail: string;
+  state: 'covered' | 'none' | 'historical';
+}
+
+export function invoiceWarrantyDisplay(
+  months: number | null
+): InvoiceWarrantyDisplay {
+  if (months === null) {
+    return {
+      duration: 'NOT RECORDED',
+      detail: 'Warranty was not recorded for this historical invoice.',
+      state: 'historical',
+    };
+  }
+
+  if (months === 0) {
+    return {
+      duration: 'NO WARRANTY',
+      detail: 'No shop warranty was selected for this invoice.',
+      state: 'none',
+    };
+  }
+
+  if (months === 1 || months === 3 || months === 6 || months === 12) {
+    return {
+      duration: `${months} ${months === 1 ? 'MONTH' : 'MONTHS'}`,
+      detail: 'Valid from the invoice date. Keep this invoice as proof of purchase.',
+      state: 'covered',
+    };
+  }
+
+  return {
+    duration: 'NOT RECORDED',
+    detail: 'The stored warranty value could not be displayed.',
+    state: 'historical',
+  };
+}
