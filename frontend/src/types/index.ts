@@ -69,6 +69,8 @@ export interface Sale {
 
   total: number;
 
+  warrantyMonths?: number | null;
+
   status: SaleStatus;
 
   paymentMethod:

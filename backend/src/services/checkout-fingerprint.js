@@ -34,6 +34,7 @@ function canonicalizeCheckoutIntent({
   customer_phone,
   customer_email,
   customer_address,
+  warranty_months,
 }) {
   const normalized = normalizeCheckoutIntent({
     items,
@@ -44,6 +45,7 @@ function canonicalizeCheckoutIntent({
     customer_phone,
     customer_email,
     customer_address,
+    warranty_months,
   });
 
   return {
@@ -52,6 +54,10 @@ function canonicalizeCheckoutIntent({
     items: normalized.items,
     payment_method: normalized.payment_method,
     discount: normalized.discount,
+    warranty_months:
+      normalized.warranty_months === null
+        ? 'automatic'
+        : normalized.warranty_months,
     customer: customerIdentityForFingerprint(normalized),
   };
 }

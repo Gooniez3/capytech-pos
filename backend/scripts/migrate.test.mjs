@@ -25,11 +25,16 @@ import {
   up as p08Up, down as p08Down, UP_SQL as P08_UP_SQL, DOWN_SQL as P08_DOWN_SQL,
   CONSTRAINT_NAMES as P08_CONSTRAINT_NAMES,
 } from '../migrations/1788652800003_p08-product-recycle-bin.mjs';
+import {
+  up as p10Up, down as p10Down, UP_SQL as P10_UP_SQL,
+  CONSTRAINT_NAME as P10_CONSTRAINT_NAME,
+} from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
 const P08 = '1788652800003_p08-product-recycle-bin';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08];
+const P10 = '1791676800000_p10-invoice-warranty';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -171,11 +176,34 @@ test('installed node-pg-migrate loads all migrations deterministically without e
     await migrations[3].up(builder);
     return builder.getSql();
   };
+  const buildP10=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[4].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
   assert.equal(await buildP06(),await buildP06());
   assert.equal(await buildP08(),await buildP08());
+  assert.equal(await buildP10(),await buildP10());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('P1.0 adds only nullable warranty metadata and never rewrites history or sequences',()=>{
+  assert.equal(P10_CONSTRAINT_NAME,'sales_warranty_months_valid_chk');
+  assert.match(P10_UP_SQL,/ADD COLUMN warranty_months smallint/);
+  assert.doesNotMatch(P10_UP_SQL,/warranty_months smallint NOT NULL/);
+  assert.match(P10_UP_SQL,/warranty_months IN \(0, 1, 3, 6, 12\)/);
+  assert.match(P10_UP_SQL,/NOT VALID/);
+  assert.match(P10_UP_SQL,/VALIDATE CONSTRAINT sales_warranty_months_valid_chk/);
+  assert.doesNotMatch(P10_UP_SQL,/\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|SETVAL|NEXTVAL|RESTART)\b/i);
+  assert.throws(p10Down,/intentionally blocked/);
+
+  const client=catalogClient(empty());
+  const builder=new MigrationBuilder(client,{},false,console);
+  p10Up(builder);
+  assert.ok(builder.getSql().includes(P10_UP_SQL));
+  assert.deepEqual(client.queries,[]);
 });
 
 test('P0.6 adds only the nullable fingerprint column and its two named checks',()=>{
@@ -332,6 +360,24 @@ test('absent migration history requires no bookkeeping SELECT or writes',async()
 
 test('malformed migration history fails before runner could repair it',async()=>{
   await assert.rejects(readHistory({query:async()=>({rows:[{relkind:'v'}]})}),/Unexpected migration history relation/);
+});
+
+test('migration history inspection supports PostgreSQL 18 NOT NULL catalog constraints',async()=>{
+  const queries=[];
+  const replies=[
+    [{relkind:'r',relpersistence:'p',relrowsecurity:false,relforcerowsecurity:false}],
+    [
+      {name:'id',type:'integer',not_null:true,default_expression:"nextval('pgmigrations_id_seq'::regclass)"},
+      {name:'name',type:'character varying(255)',not_null:true,default_expression:null},
+      {name:'run_on',type:'timestamp without time zone',not_null:true,default_expression:null},
+    ],
+    [{name:'pgmigrations_pkey',definition:'PRIMARY KEY (id)'}],
+    [{name:'pgmigrations_id_seq',schema:'public',column_name:'id'}],
+    [{name:BASELINE}],
+  ];
+  const client={query:async(sql)=>{queries.push(sql);return {rows:replies.shift()};}};
+  assert.deepEqual(await readHistory(client),[BASELINE]);
+  assert.match(queries[2],/contype <> 'n'/);
 });
 
 test('CLI rejects unsafe runner flags and requires an exact write target',async()=>{

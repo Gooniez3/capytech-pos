@@ -5,7 +5,10 @@ require('dotenv').config();
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
+    return res.status(401).json({
+      error: 'Please sign in to continue',
+      code: 'AUTH_TOKEN_MISSING',
+    });
   }
 
   const token = authHeader.split(' ')[1];
@@ -14,7 +17,15 @@ function requireAuth(req, res, next) {
     req.user = decoded; // { id, username, role }
     next();
   } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    const expired = err && err.name === 'TokenExpiredError';
+    return res.status(401).json({
+      error: expired
+        ? 'Your session expired. Please sign in again.'
+        : 'Your session is invalid. Please sign in again.',
+      code: expired
+        ? 'AUTH_TOKEN_EXPIRED'
+        : 'AUTH_TOKEN_INVALID',
+    });
   }
 }
 

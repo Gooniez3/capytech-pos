@@ -1,5 +1,6 @@
 import {
   createContext,
+  useEffect,
   useContext,
   useMemo,
   useState,
@@ -7,6 +8,13 @@ import {
 } from 'react';
 
 import type { User } from '@/types';
+import {
+  AUTH_EXPIRED_EVENT,
+  TOKEN_STORAGE_KEY,
+  USER_STORAGE_KEY,
+  clearStoredAuthSession,
+} from '@/lib/authSession';
+import { api } from '@/lib/api';
 
 interface AuthContextValue {
   user: User | null;
@@ -27,9 +35,6 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const USER_STORAGE_KEY = 'pos-auth-user';
-const TOKEN_STORAGE_KEY = 'pos-auth-token';
-
 const API_URL = '';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -43,6 +48,72 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const [loading, setLoading] = useState(false);
+  const authenticatedUserId = user?.id;
+
+  useEffect(() => {
+    function handleExpiredSession() {
+      setUser(null);
+    }
+
+    window.addEventListener(
+      AUTH_EXPIRED_EVENT,
+      handleExpiredSession
+    );
+
+    return () => {
+      window.removeEventListener(
+        AUTH_EXPIRED_EVENT,
+        handleExpiredSession
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authenticatedUserId) {
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+
+    api
+      .get<User>('/api/auth/profile')
+      .then((profile) => {
+        if (cancelled) {
+          return;
+        }
+
+        setUser((currentUser) => {
+          if (!currentUser) {
+            return currentUser;
+          }
+
+          const validatedUser: User = {
+            ...currentUser,
+            ...profile,
+            status: 'active',
+          };
+
+          localStorage.setItem(
+            USER_STORAGE_KEY,
+            JSON.stringify(validatedUser)
+          );
+          return validatedUser;
+        });
+      })
+      .catch(() => {
+        // The shared API handler clears invalid sessions and redirects.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedUserId]);
 
   async function login(
     username: string,
@@ -167,8 +238,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
 
     try {
-      localStorage.removeItem(USER_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      clearStoredAuthSession();
     } catch {
       // ignore storage errors
     }

@@ -15,6 +15,7 @@ const POSTGRES_INTEGER_MAX = 2147483647;
 const POSTGRES_NUMERIC_10_2_MAX_MINOR = 9999999999;
 const MAX_CHECKOUT_LINES = 100;
 const MAX_CUSTOMER_ADDRESS_LENGTH = 2000;
+const { normalizeWarrantySelection } = require('./warranty');
 
 class CheckoutValidationError extends Error {
   constructor(message) {
@@ -278,6 +279,10 @@ function normalizeCheckoutIntent(input) {
     payment_method: normalizePaymentMethod(input.payment_method),
     discount: discount.canonical,
     discount_minor_units: discount.minorUnits,
+    warranty_months: normalizeWarrantySelection(
+      input.warranty_months,
+      { allowAutomatic: true }
+    ),
     customer_id: normalizeOptionalInteger(input.customer_id, 'customer_id'),
     customer_name: normalizeCustomerText(input.customer_name, 'customer_name', 200),
     customer_phone: normalizeCustomerText(input.customer_phone, 'customer_phone', 50),
@@ -387,6 +392,7 @@ module.exports = {
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,
   normalizeRequiredInteger,
+  normalizeWarrantySelection,
   parseStoreTaxRatePercent,
   resolveCheckoutCustomerSnapshot,
   taxMinorUnitsOnNet,

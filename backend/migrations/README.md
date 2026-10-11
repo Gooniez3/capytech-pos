@@ -157,10 +157,26 @@ column after it contains data is not a safe reversal. Prefer a reviewed forward
 correction in production. Restoring a backup is a separate recovery procedure
 that can lose transactions after the backup; it is not an ordinary migration down.
 
+## P10 invoice warranty migration
+
+`1791676800000_p10-invoice-warranty.mjs` is an additive, forward-only migration.
+It adds nullable, default-free `sales.warranty_months` and a validated check allowing
+only `NULL`, `0`, `1`, `3`, `6`, or `12`. It contains no `UPDATE`, `DELETE`, seed,
+sequence, table-drop, or column-drop operation. Historical invoices remain `NULL`;
+`0` is reserved for an explicitly selected no-warranty result on a new or
+authorized-corrected invoice. Its `down` intentionally throws because removing a
+column after it contains invoice data is not a production-safe rollback.
+
+Before production use, follow [the macOS upgrade runbook](../../docs/PRODUCTION_UPGRADE.md).
+The updater first restores a complete backup into an isolated `capytech_verify_*`
+database, applies this migration there, and compares protected table, inventory,
+invoice, image-reference, and sequence manifests before touching the live schema.
+
 ## Implementation validation boundary
 
 Unit tests use in-memory metadata fixtures and compile SQL with the actual pinned
 migration library without executing it. Static checks and read-only check/status
-are safe to run against the current store. Fresh-database application, live
-baseline registration, and real rollback have **not** been executed as part of
-this implementation and require a separately authorized validation/deployment step.
+are safe to run against the current store. The backup verifier provides a guarded
+real restore/migration rehearsal when a reviewed backup and PostgreSQL instance are
+available. Live production migration, baseline registration, and real rollback are
+deployment actions and require separate approval.

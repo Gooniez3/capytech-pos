@@ -24,6 +24,7 @@ const baseRequest = () => ({
   customer_phone: ' 091234 ',
   customer_email: ' ada@example.com ',
   customer_address: ' Main Street ',
+  warranty_months: 3,
 });
 
 const digest = input => createCheckoutFingerprint(input).toString('hex');
@@ -41,6 +42,7 @@ for (const [name, mutate] of [
   ['discount', request => { request.discount = 101; }],
   ['customer', request => { request.customer_id = 5; }],
   ['authenticated user', request => { request.user_id = 8; }],
+  ['warranty selection', request => { request.warranty_months = 12; }],
 ]) {
   test(`a different ${name} produces a different digest`, () => {
     const changed = baseRequest();
@@ -331,9 +333,10 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
       }
       if (sql.includes("nextval(")) return { rows: [{ invoice_number: '1' }] };
       if (sql.includes('INSERT INTO sales')) {
-        assert.equal(values.at(-2), key);
-        assert.ok(Buffer.isBuffer(values.at(-1)));
-        assert.equal(values.at(-1).length, 32);
+        assert.equal(values.at(-3), key);
+        assert.ok(Buffer.isBuffer(values.at(-2)));
+        assert.equal(values.at(-2).length, 32);
+        assert.equal(values.at(-1), 0);
         return { rows: [{ id: 51, invoice_number: 'INV-000001', idempotency_key: key }] };
       }
       if (sql.includes('INSERT INTO sale_items')) return { rowCount: 1, rows: [] };
@@ -673,7 +676,24 @@ test('checkout without a customer still creates a sale', async () => {
 
   const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
   assert.equal(saleInsert.values[2], null);
+  assert.equal(saleInsert.values[14], 0);
   assert.equal(queries.some(entry => entry.sql.includes('FROM customers')), false);
+});
+
+test('staff-selected warranty is persisted with the new sale', async () => {
+  const { client, queries } = productSaleClient();
+
+  await withMockPool({ query: async () => ({ rows: [] }), connect: async () => client }, async () => {
+    const response = await postCheckout({
+      ...validCheckoutBody('aa3e4567-e89b-42d3-a456-426614174000'),
+      warranty_months: 12,
+    });
+    assert.equal(response.statusCode, 201);
+  });
+
+  const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
+  assert.match(saleInsert.sql, /warranty_months/);
+  assert.equal(saleInsert.values[14], 12);
 });
 
 test('same key and same request returns the original sale without a second stock update', async () => {

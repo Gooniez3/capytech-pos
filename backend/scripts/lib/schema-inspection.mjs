@@ -179,7 +179,10 @@ export async function readHistory(client) {
   ];
   if (schemaDifferences({columns:expected},{columns}).length) throw new Error('Unexpected migration history columns; no repair attempted.');
   const constraints = (await client.query(`SELECT conname AS name, pg_catalog.pg_get_constraintdef(oid) AS definition
-    FROM pg_catalog.pg_constraint WHERE conrelid='public.pgmigrations'::regclass ORDER BY conname`)).rows;
+    FROM pg_catalog.pg_constraint
+    WHERE conrelid='public.pgmigrations'::regclass
+      AND contype <> 'n'
+    ORDER BY conname`)).rows;
   if (constraints.length !== 1 || constraints[0].definition !== 'PRIMARY KEY (id)') {
     throw new Error('Unexpected migration history constraints; no repair attempted.');
   }

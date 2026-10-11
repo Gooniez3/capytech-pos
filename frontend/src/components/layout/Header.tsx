@@ -261,35 +261,7 @@ async function deleteAllNotifications() {
   async function apiRequestPatch(
     endpoint: string
   ) {
-    const token =
-      localStorage.getItem(
-        'pos-auth-token'
-      );
-
-    const response =
-      await fetch(
-  endpoint,
-        {
-          method: 'PATCH',
-
-          headers: {
-            Authorization:
-              `Bearer ${token}`,
-          },
-        }
-      );
-
-    const data =
-      await response.json();
-
-    if (!response.ok) {
-      throw new Error(
-        data?.error ||
-          'Request failed'
-      );
-    }
-
-    return data;
+    return api.patch(endpoint);
   }
 
   /* =========================================================

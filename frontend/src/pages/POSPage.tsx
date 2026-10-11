@@ -58,6 +58,12 @@ import {
 } from '@/lib/currency';
 
 import { api } from '@/lib/api';
+import {
+  WARRANTY_OPTIONS,
+  suggestWarrantyMonths,
+  warrantyLabel,
+  type WarrantyMonths,
+} from '@/lib/warranty';
 
 /* =========================================================
    API TYPES
@@ -281,6 +287,8 @@ interface POSDraft {
 
   saveCustomer: boolean;
   paymentMethod: Sale['paymentMethod'];
+  warrantyMonths: WarrantyMonths;
+  warrantyOverridden: boolean;
 
   // UI state
   activeCategory: string;
@@ -510,6 +518,14 @@ const [
       ?.paymentMethod ?? 'cash'
 );
 
+const [warrantyMonths, setWarrantyMonths] = useState<WarrantyMonths>(
+  () => savedDraftRef.current?.warrantyMonths ?? 0
+);
+
+const [warrantyOverridden, setWarrantyOverridden] = useState(
+  () => savedDraftRef.current?.warrantyOverridden ?? false
+);
+
   const [
   checkoutOpen,
   setCheckoutOpen,
@@ -646,6 +662,8 @@ const [
   invoiceCustomer,
   saveCustomer,
   paymentMethod,
+  warrantyMonths,
+  warrantyOverridden,
 
   activeCategory,
   desktopCartOpen,
@@ -670,6 +688,8 @@ const [
   invoiceCustomer,
   saveCustomer,
   paymentMethod,
+  warrantyMonths,
+  warrantyOverridden,
   activeCategory,
   desktopCartOpen,
   checkoutOpen,
@@ -855,6 +875,18 @@ const [
 
   const total = netAfterDiscount + taxAmount;
 
+  useEffect(() => {
+    if (checkoutOpen && !warrantyOverridden) {
+      setWarrantyMonths(suggestWarrantyMonths(total));
+    }
+  }, [checkoutOpen, total, warrantyOverridden]);
+
+  function openCheckout() {
+    setWarrantyMonths(suggestWarrantyMonths(total));
+    setWarrantyOverridden(false);
+    setCheckoutOpen(true);
+  }
+
   const totalItems =
     cart.reduce(
       (sum, line) =>
@@ -1028,6 +1060,8 @@ const [
   setCart([]);
   setDiscount(0);
   setDiscountPercent(0);
+  setWarrantyMonths(0);
+  setWarrantyOverridden(false);
   setDesktopCartOpen(false);
 
   localStorage.removeItem(
@@ -1729,6 +1763,10 @@ async function completeSale() {
 
 idempotency_key:
   idempotencyKey,
+
+      ...(warrantyOverridden
+        ? { warranty_months: warrantyMonths }
+        : {}),
 };
     const result =
       await api.post<{
@@ -1744,6 +1782,7 @@ idempotency_key:
             Sale['paymentMethod'];
           status: string;
           created_at: string;
+          warranty_months: number | string | null;
         };
 
         items: {
@@ -1854,6 +1893,11 @@ idempotency_key:
 
       paymentMethod:
         result.sale.payment_method,
+
+      warrantyMonths:
+        result.sale.warranty_months === null
+          ? null
+          : Number(result.sale.warranty_months),
     };
 
     setLastSale(sale);
@@ -2403,9 +2447,7 @@ const scannedProductAvailable =
       onUpdateQty={updateQty}
       onRemoveLine={removeLine}
       onClear={clearCart}
-      onCheckout={() =>
-        setCheckoutOpen(true)
-      }
+      onCheckout={openCheckout}
       onCollapse={() =>
     setDesktopCartOpen(false)
       }
@@ -2561,9 +2603,7 @@ const scannedProductAvailable =
                   false
                 );
 
-                setCheckoutOpen(
-                  true
-                );
+                openCheckout();
               }}
               noHeader
             />
@@ -3495,6 +3535,46 @@ const scannedProductAvailable =
     )}
   </div>
 </div>
+
+  {/* =====================================================
+      WARRANTY
+      ===================================================== */}
+
+  <div>
+    <div className="mb-2 flex items-center justify-between gap-3">
+      <p className="text-sm font-semibold text-slate-700">
+        Invoice Warranty
+      </p>
+
+      <span className="text-right text-xs font-medium text-slate-400">
+        {warrantyOverridden ? 'Staff selection' : 'Suggested from final total'}
+      </span>
+    </div>
+
+    <div className="grid grid-cols-5 gap-1.5 sm:gap-2">
+      {WARRANTY_OPTIONS.map((months) => (
+        <button
+          type="button"
+          key={months}
+          onClick={() => {
+            setWarrantyMonths(months);
+            setWarrantyOverridden(true);
+          }}
+          className={`h-10 rounded-lg border text-xs font-semibold transition-all ${
+            warrantyMonths === months
+              ? 'border-brand-500 bg-brand-50 text-brand-700 ring-1 ring-brand-500'
+              : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+          }`}
+        >
+          {months === 0 ? 'None' : `${months} mo`}
+        </button>
+      ))}
+    </div>
+
+    <p className="mt-2 text-xs text-slate-500">
+      Selected: {warrantyLabel(warrantyMonths)}. This choice will be saved with the invoice.
+    </p>
+  </div>
 
    {/* =====================================================
     PAYMENT METHOD

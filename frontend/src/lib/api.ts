@@ -1,7 +1,27 @@
+import {
+  AUTH_EXPIRED_EVENT,
+  SESSION_EXPIRED_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+  clearStoredAuthSession,
+} from '@/lib/authSession';
+
 const API_URL = '';
 
+function getErrorMessage(data: unknown): string | null {
+  if (
+    typeof data === 'object' &&
+    data !== null &&
+    'error' in data &&
+    typeof data.error === 'string'
+  ) {
+    return data.error;
+  }
+
+  return null;
+}
+
 function getToken(): string | null {
-  return localStorage.getItem('pos-auth-token');
+  return localStorage.getItem(TOKEN_STORAGE_KEY);
 }
 
 export async function apiRequest<T>(
@@ -49,7 +69,7 @@ export async function apiRequest<T>(
     );
   }
 
-  let data: any = null;
+  let data: unknown = null;
 
   try {
     data = await response.json();
@@ -58,22 +78,39 @@ export async function apiRequest<T>(
   }
 
   if (!response.ok) {
+    const errorMessage = getErrorMessage(data);
+
     if (response.status === 401) {
+      clearStoredAuthSession();
+
+      try {
+        sessionStorage.setItem(
+          SESSION_EXPIRED_STORAGE_KEY,
+          'true'
+        );
+      } catch {
+        // The redirect still works when browser storage is unavailable.
+      }
+
+      window.dispatchEvent(
+        new Event(AUTH_EXPIRED_EVENT)
+      );
+
       throw new Error(
-        data?.error ||
+        errorMessage ||
           'Your session has expired. Please sign in again.'
       );
     }
 
     if (response.status === 403) {
       throw new Error(
-        data?.error ||
+        errorMessage ||
           'You do not have permission to perform this action.'
       );
     }
 
     throw new Error(
-      data?.error ||
+      errorMessage ||
         `Request failed (${response.status})`
     );
   }

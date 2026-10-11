@@ -13,6 +13,7 @@ import {
 
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/context/ToastContext';
+import { SESSION_EXPIRED_STORAGE_KEY } from '@/lib/authSession';
 
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -37,6 +38,23 @@ export function LoginPage() {
 
   useEffect(() => {
     let cancelled = false;
+
+    try {
+      if (
+        sessionStorage.getItem(
+          SESSION_EXPIRED_STORAGE_KEY
+        )
+      ) {
+        sessionStorage.removeItem(
+          SESSION_EXPIRED_STORAGE_KEY
+        );
+        setError(
+          'Your session expired. Please sign in again.'
+        );
+      }
+    } catch {
+      // Login remains available when session storage is disabled.
+    }
 
     fetch('/api/auth/setup-status')
       .then(async (response) => {

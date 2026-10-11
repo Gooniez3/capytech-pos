@@ -27,7 +27,7 @@ CapyTech POS runs HTTPS on the shop PC (`https://localhost:5173`). PostgreSQL is
 
 | Capability | What it provides |
 | --- | --- |
-| **Checkout** | Cart, line discounts, store tax from settings, cash / KBZ Pay / Wave Pay / MMQR, invoice print. Server recomputes totals from database prices. |
+| **Checkout** | Cart, line discounts, store tax from settings, cash / KBZ Pay / Wave Pay / MMQR, invoice warranty, and invoice print. Server recomputes totals from database prices. |
 | **Stock safety** | Row-level stock locks at charge time so two overlapping sales cannot oversell the same variant. |
 | **Idempotent charge** | Client checkout UUID plus a server fingerprint so a double-click or retry does not create two invoices. |
 | **Products & variants** | SKUs, barcodes, costs, prices, photos, categories, barcode labels, and a recently-deleted restore bin. |
@@ -38,7 +38,7 @@ CapyTech POS runs HTTPS on the shop PC (`https://localhost:5173`). PostgreSQL is
 | **Phone scanner** | Pair a phone on shop Wi-Fi (not Guest). The phone camera sends barcodes to the till over Socket.IO. |
 | **First-open setup** | If there are no users, the owner creates name, username, and password. No shared demo login. |
 | **Remember me** | Optional 30-day session so the till stays signed in overnight. |
-| **Local backup** | `pg_dump`, product photos, and `shop.env` to USB, plus Time Machine on Mac. |
+| **Local backup** | Verified PostgreSQL dump, complete product-image storage, `backend/.env`, certificates, and operational metadata, plus USB checksum verification and Time Machine on Mac. |
 
 ## Product walkthrough
 
@@ -155,7 +155,8 @@ capytech-pos/
 |-- scripts/                  # Start, backup, Mac install, empty-shop prepare
 |-- Start CapyTech POS.*      # Daily till launcher
 |-- Backup CapyTech POS.*     # Daily backup launcher
-`-- Install CapyTech POS.command  # Mac empty-shop installer
+|-- Update CapyTech POS.command   # Guarded existing-shop updater
+`-- Install CapyTech POS.command  # Mac empty-shop installer only
 ```
 
 ## Local development
@@ -192,6 +193,8 @@ npm run dev
 Open [https://localhost:5173](https://localhost:5173). On an empty database the first screen creates the owner account.
 
 On a **shop Mac**, double-click **Install CapyTech POS** instead of copying a developer `.env` or restoring a test USB dump. That installer creates an empty `pos_store`. Do not copy sales from another computer.
+
+For an **existing shop with real data**, never run Install or the customer-preparation script. Use the reviewed [production-safe macOS upgrade runbook](docs/PRODUCTION_UPGRADE.md) and the dedicated **Update CapyTech POS** launcher.
 
 ### Daily shop use
 

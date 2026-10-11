@@ -24,6 +24,10 @@ const {
   taxMinorUnitsOnNet,
   validateCheckoutRequest,
 } = require('../services/checkout-validation');
+const {
+  normalizeWarrantySelection,
+  suggestWarrantyMonths,
+} = require('../services/warranty');
 
 const router = express.Router();
 
@@ -225,6 +229,7 @@ router.post('/', requireAuth, async (req, res) => {
     customer_phone,
     customer_email,
     customer_address,
+    warranty_months: requestedWarrantyMonths,
     idempotency_key: idempotencyKey,
   } = checkoutRequest;
 
@@ -241,6 +246,7 @@ router.post('/', requireAuth, async (req, res) => {
       customer_phone,
       customer_email,
       customer_address,
+      warranty_months: requestedWarrantyMonths,
     });
 
     const existingCheckout = await findExistingCheckout(
@@ -624,6 +630,10 @@ continue;
     const discountAmount = minorUnitsToDatabaseDecimal(discountMinorUnits);
     const taxAmount = minorUnitsToDatabaseDecimal(taxMinorUnits);
     const total = minorUnitsToDatabaseDecimal(totalMinorUnits);
+    const warrantyMonths =
+      requestedWarrantyMonths === null
+        ? suggestWarrantyMonths(totalMinorUnits)
+        : requestedWarrantyMonths;
 
     /* All inventory and monetary validation is complete before this point. */
     for (const mutation of inventoryMutations) {
@@ -679,13 +689,14 @@ continue;
       total,
       payment_method,
       idempotency_key,
-      checkout_request_fingerprint
+      checkout_request_fingerprint,
+      warranty_months
     )
     VALUES (
       $1, $2, $3,
       $4, $5, $6, $7,
       $8, $9, $10, $11,
-      $12, $13, $14
+      $12, $13, $14, $15
     )
     RETURNING *
   `,
@@ -707,6 +718,7 @@ continue;
 
     idempotencyKey,
     checkoutFingerprint,
+    warrantyMonths,
   ]
 );
 
@@ -848,6 +860,95 @@ ORDER BY s.created_at DESC
     });
   }
 });
+
+// PATCH /api/sales/:id/warranty
+// Admin-only correction for an invoice that has already been created.
+router.patch(
+  '/:id/warranty',
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    let warrantyMonths;
+
+    try {
+      warrantyMonths = normalizeWarrantySelection(
+        req.body?.warranty_months
+      );
+    } catch (err) {
+      return res.status(err.statusCode || 400).json({
+        error: err.message,
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await revalidateCurrentAdmin(client, req.user.id);
+
+      const currentResult = await client.query(
+        `
+          SELECT id, invoice_number, warranty_months
+          FROM sales
+          WHERE id = $1
+          FOR UPDATE
+        `,
+        [req.params.id]
+      );
+
+      const current = currentResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Sale not found' });
+      }
+
+      const updatedResult = await client.query(
+        `
+          UPDATE sales
+          SET warranty_months = $2
+          WHERE id = $1
+          RETURNING id, invoice_number, warranty_months
+        `,
+        [current.id, warrantyMonths]
+      );
+
+      await client.query(
+        `
+          INSERT INTO audit_log (user_id, action, details)
+          VALUES ($1, 'UPDATE_INVOICE_WARRANTY', $2)
+        `,
+        [
+          req.user.id,
+          JSON.stringify({
+            saleId: current.id,
+            invoiceNumber: current.invoice_number,
+            previousWarrantyMonths: current.warranty_months,
+            warrantyMonths,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      return res.json({
+        id: String(updatedResult.rows[0].id),
+        invoiceNumber: updatedResult.rows[0].invoice_number,
+        warrantyMonths: Number(updatedResult.rows[0].warranty_months),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+
+      if (err.statusCode) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+
+      console.error('Warranty update failed:', err);
+      return res.status(500).json({ error: 'Failed to update warranty' });
+    } finally {
+      client.release();
+    }
+  }
+);
 
 // POST /api/sales/:id/void
 // Admin only - restores exact product/variant stock
@@ -1242,6 +1343,7 @@ router.get(
       s.tax,
       s.total,
       s.payment_method,
+      s.warranty_months,
       s.status,
       s.created_at,
 
@@ -1350,6 +1452,11 @@ subtotal:
 
         total:
           Number(sale.total),
+
+        warrantyMonths:
+          sale.warranty_months === null
+            ? null
+            : Number(sale.warranty_months),
 
         refundedAt:
   sale.refunded_at,

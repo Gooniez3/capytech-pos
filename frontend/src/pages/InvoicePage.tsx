@@ -10,9 +10,16 @@ import {
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import { useToast } from '@/context/ToastContext';
 import {
   formatCurrency,
 } from '@/lib/currency';
+import {
+  WARRANTY_OPTIONS,
+  warrantyLabel,
+  type WarrantyMonths,
+} from '@/lib/warranty';
 
 /* =========================================================
    TYPES
@@ -90,6 +97,8 @@ interface InvoiceData {
 
   total: number;
 
+  warrantyMonths: number | null;
+
   refundedAt:
   string | null;
 
@@ -111,6 +120,8 @@ voidedAt:
    ========================================================= */
 
 export function InvoicePage() {
+  const { user } = useAuth();
+  const { toast } = useToast();
   const saleId =
     window.location.pathname
       .split('/')
@@ -136,6 +147,11 @@ export function InvoicePage() {
     setError,
   ] =
     useState('');
+
+  const [warrantyChoice, setWarrantyChoice] =
+    useState<WarrantyMonths>(0);
+  const [savingWarranty, setSavingWarranty] =
+    useState(false);
 
     const [
   storeSettings,
@@ -190,6 +206,11 @@ export function InvoicePage() {
       ...invoiceData,
       tax: Number(invoiceData.tax ?? 0),
     });
+    setWarrantyChoice(
+      invoiceData.warrantyMonths === null
+        ? 0
+        : invoiceData.warrantyMonths as WarrantyMonths
+    );
 
     setStoreSettings(
       storeData
@@ -204,6 +225,34 @@ export function InvoicePage() {
     setLoading(false);
   }
 }
+
+  async function saveWarranty() {
+    if (!saleId || user?.role !== 'admin') {
+      return;
+    }
+
+    try {
+      setSavingWarranty(true);
+      const updated = await api.patch<{ warrantyMonths: number }>(
+        `/api/sales/${saleId}/warranty`,
+        { warranty_months: warrantyChoice }
+      );
+
+      setInvoice((current) =>
+        current
+          ? { ...current, warrantyMonths: updated.warrantyMonths }
+          : current
+      );
+      toast('Invoice warranty updated.', 'success');
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : 'Failed to update warranty.',
+        'error'
+      );
+    } finally {
+      setSavingWarranty(false);
+    }
+  }
   /* =========================================================
      LOADING
      ========================================================= */
@@ -387,6 +436,44 @@ export function InvoicePage() {
     Print Invoice
   </button>
 </div>
+
+{user?.role === 'admin' && (
+  <div className="mx-auto mb-4 max-w-[210mm] rounded-xl border border-slate-200 bg-white p-4 print:hidden">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+      <label className="flex-1">
+        <span className="mb-1.5 block text-sm font-semibold text-slate-700">
+          Saved invoice warranty
+        </span>
+        <select
+          value={warrantyChoice}
+          onChange={(event) =>
+            setWarrantyChoice(Number(event.target.value) as WarrantyMonths)
+          }
+          className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900"
+        >
+          {WARRANTY_OPTIONS.map((months) => (
+            <option key={months} value={months}>
+              {warrantyLabel(months)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <button
+        type="button"
+        disabled={savingWarranty || warrantyChoice === invoice.warrantyMonths}
+        onClick={saveWarranty}
+        className="h-10 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {savingWarranty ? 'Saving...' : 'Save Warranty'}
+      </button>
+    </div>
+    <p className="mt-2 text-xs text-slate-500">
+      Existing-invoice changes require an administrator and are written to the audit log.
+    </p>
+  </div>
+)}
+
       {/* =====================================================
           A4 PAPER
           ===================================================== */}
@@ -1103,10 +1190,13 @@ export function InvoicePage() {
           </p>
 
           <p className="mt-3 max-w-[155mm] text-[13px] font-medium leading-5 text-slate-900">
-            Warranty coverage depends on the individual product
-            and manufacturer terms. Please keep this invoice as
-            proof of purchase for warranty, return, exchange, or
-            after-sales support.
+            {invoice.warrantyMonths === null
+              ? 'Warranty not recorded for this legacy invoice.'
+              : invoice.warrantyMonths === 0
+                ? 'No shop warranty was selected for this invoice.'
+                : `Shop warranty: ${warrantyLabel(invoice.warrantyMonths)} from the invoice date.`}
+            {' '}Please keep this invoice as proof of purchase for warranty,
+            return, exchange, or after-sales support.
           </p>
 
         </section>
