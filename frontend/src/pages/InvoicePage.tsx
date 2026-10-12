@@ -7,7 +7,6 @@ import {
   ArrowLeft,
   Printer,
   RefreshCw,
-  ShieldCheck,
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
@@ -1032,10 +1031,7 @@ export function InvoicePage() {
 
         </section>
 
-        {/* ===================================================
-            SHOP WARRANTY
-            Uses only the value stored on this invoice.
-            =================================================== */}
+        {/* Uses only the warranty value stored on this invoice. */}
 
         <section
           data-testid="invoice-warranty-panel"
@@ -1043,82 +1039,48 @@ export function InvoicePage() {
             mt-4
             break-inside-avoid
             overflow-hidden
-            rounded-xl
-            border-2
-            border-slate-900
-            bg-slate-50
-            print:rounded-none
+            border
+            border-slate-800
+            bg-white
             print:border-black
             print:bg-white
           "
         >
           <div
             className="
-              flex
-              flex-col
-              gap-3
+              border-b
+              border-slate-800
               px-4
-              py-3.5
-              sm:flex-row
-              sm:items-center
-              sm:gap-4
-              print:flex-row
-              print:items-center
-              print:gap-4
-              print:px-4
-              print:py-3
+              py-2
+              print:border-black
             "
           >
-            <div
-              className="
-                flex
-                h-12
-                w-12
-                shrink-0
-                items-center
-                justify-center
-                rounded-full
-                border-2
-                border-slate-900
-                bg-slate-900
-                text-white
-                print:border-black
-                print:bg-white
-                print:text-black
-              "
-            >
-              <ShieldCheck
-                aria-hidden="true"
-                className="h-7 w-7"
-                strokeWidth={2.25}
-              />
-            </div>
+            <p className="text-[11px] font-black uppercase tracking-[0.14em] text-black">
+              WARRANTY &amp; PURCHASE INFORMATION
+            </p>
+          </div>
 
-            <div className="min-w-0 flex-1">
-              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700 print:text-black">
-                Shop Warranty
-              </p>
-
+          <div className="px-4 py-3 print:px-4 print:py-2.5">
+            <div className="flex items-baseline justify-between gap-4">
+              <p className="text-sm font-bold text-black">Shop Warranty</p>
               <p
                 data-testid="invoice-warranty-duration"
-                className="mt-0.5 text-2xl font-black leading-none tracking-tight text-black sm:text-[28px] print:text-[25px]"
+                className="text-right text-xl font-black leading-none tracking-tight text-black print:text-lg"
               >
                 {warrantyDisplay.duration}
               </p>
-
-              <p className="mt-1.5 text-[12px] font-semibold leading-4 text-slate-700 print:text-black">
-                {warrantyDisplay.detail}
-              </p>
             </div>
 
-            <div className="border-t border-slate-400 pt-2 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0 print:border-l print:border-t-0 print:border-black print:pl-4 print:pt-0">
-              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-600 print:text-black">
-                Invoice reference
-              </p>
-              <p className="mt-0.5 whitespace-nowrap font-mono text-[12px] font-bold text-black">
-                {invoice.invoiceNumber}
-              </p>
-            </div>
+            <p className="mt-2 border-t border-slate-300 pt-2 text-[12px] leading-4 text-black print:border-black">
+              <span className="font-bold">Warranty Period:</span>{' '}
+              From the purchase date
+            </p>
+
+            <p className="mt-1.5 text-[11px] leading-4 text-slate-700 print:text-black">
+              Please retain this invoice as proof of purchase for warranty claims
+              and after-sales support. Warranty coverage is subject to shop terms
+              and conditions.
+            </p>
           </div>
         </section>
 

@@ -159,7 +159,9 @@ test('invoice print view renders warranty and keeps the admin editor off paper',
   assert.match(invoice, /Warranty/);
   assert.match(invoice, /invoiceWarrantyDisplay/);
   assert.match(invoice, /invoice-warranty-panel/);
-  assert.match(invoice, /ShieldCheck/);
+  assert.match(invoice, /WARRANTY &amp; PURCHASE INFORMATION/);
+  assert.match(invoice, /break-inside-avoid/);
+  assert.doesNotMatch(invoice, /ShieldCheck/);
   assert.match(invoice, /print:hidden/);
   assert.match(invoice, /\/warranty/);
 });
