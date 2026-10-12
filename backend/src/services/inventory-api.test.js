@@ -1,0 +1,119 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const inventoryPolicyRoutes = require('../routes/inventory-policies');
+const stockUnitRoutes = require('../routes/stock-units');
+const warrantyLookupRoutes = require('../routes/warranty-lookup');
+const { normalizePolicyPatch } = require('./inventory-policy-service');
+const { listParameters, listStockUnits } = require('./stock-unit-api-service');
+const { normalizeWarrantyLookup } = require('./warranty-lookup-service');
+
+function route(router, path, method) {
+  return router.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]);
+}
+
+function middlewareNames(layer) {
+  return layer.route.stack.map((entry) => entry.name);
+}
+
+test('policy payload validation accepts inheritance and rejects unsafe fields', () => {
+  assert.deepEqual(normalizePolicyPatch({
+    serial_tracking_enabled: null,
+    shop_warranty_enabled: null,
+    shop_warranty_months: null,
+  }, { variant: true }), {
+    serial_tracking_enabled: null,
+    shop_warranty_enabled: null,
+    shop_warranty_months: null,
+  });
+  assert.throws(
+    () => normalizePolicyPatch({ shop_warranty_enabled: true, manufacturer_warranty: 12 }),
+    /Unknown request body field/
+  );
+  assert.throws(
+    () => normalizePolicyPatch({ shop_warranty_months: 24 }),
+    /1, 3, 6, 12/
+  );
+});
+
+test('stock-unit pagination and filters are bounded', () => {
+  assert.deepEqual(listParameters({ page: '2', limit: '50', state: 'quarantined' }), {
+    page: 2,
+    limit: 50,
+    offset: 50,
+    state: 'quarantined',
+    productId: null,
+    variantId: null,
+    search: null,
+  });
+  assert.throws(() => listParameters({ limit: 101 }), /between 1 and 100/);
+  assert.throws(() => listParameters({ state: 'deleted' }), /state must be/);
+});
+
+test('stock-unit free-text filtering accepts non-serial punctuation', async () => {
+  const calls = [];
+  const queryable = {
+    async query(sql, values) {
+      calls.push({ sql, values: [...values] });
+      return calls.length === 1 ? { rows: [{ count: 0 }] } : { rows: [] };
+    },
+  };
+  const result = await listStockUnits(queryable, { q: '---' });
+  assert.equal(result.pagination.total, 0);
+  assert.equal(calls.length, 2);
+  assert.doesNotMatch(calls[0].sql, /normalized_serial_number\s*=/);
+  assert.deepEqual(calls[0].values, ['%---%']);
+});
+
+test('warranty lookup requires exactly one supported identity', () => {
+  assert.deepEqual(normalizeWarrantyLookup({ invoice_number: ' INV-1 ' }), {
+    field: 'invoice_number', value: 'INV-1',
+  });
+  assert.throws(
+    () => normalizeWarrantyLookup({ invoice_number: 'INV-1', serial_number: 'SN-1' }),
+    /exactly one/
+  );
+  assert.throws(() => normalizeWarrantyLookup({ product_id: '1' }), /Unknown query field/);
+});
+
+test('read APIs require authentication and mutation APIs require admin', () => {
+  assert.deepEqual(middlewareNames(route(stockUnitRoutes, '/', 'get')), ['requireAuth', '<anonymous>']);
+  assert.deepEqual(
+    middlewareNames(route(stockUnitRoutes, '/receive', 'post')).slice(0, 2),
+    ['requireAuth', 'requireAdmin']
+  );
+  assert.deepEqual(
+    middlewareNames(route(stockUnitRoutes, '/:id/serial', 'patch')).slice(0, 2),
+    ['requireAuth', 'requireAdmin']
+  );
+  assert.deepEqual(
+    middlewareNames(route(stockUnitRoutes, '/release', 'post')).slice(0, 2),
+    ['requireAuth', 'requireAdmin']
+  );
+  assert.deepEqual(
+    middlewareNames(route(stockUnitRoutes, '/retire', 'post')).slice(0, 2),
+    ['requireAuth', 'requireAdmin']
+  );
+  assert.deepEqual(
+    middlewareNames(route(inventoryPolicyRoutes, '/:productId/inventory-policy', 'patch')).slice(0, 2),
+    ['requireAuth', 'requireAdmin']
+  );
+  assert.deepEqual(
+    middlewareNames(route(warrantyLookupRoutes, '/', 'get')),
+    ['requireAuth', '<anonymous>']
+  );
+});
+
+test('scanner and manual batches share one strict payload contract', () => {
+  const normalized = stockUnitRoutes.normalizeBatches({
+    batches: [{ product_id: 4, variant_id: null, serial_numbers: [' 00-A-1 '] }],
+  });
+  assert.deepEqual(normalized, [{
+    productId: 4, variantId: null, serialNumbers: [' 00-A-1 '],
+  }]);
+  assert.throws(
+    () => stockUnitRoutes.normalizeBatches({
+      batches: [{ product_id: 4, serial_numbers: ['A'], quantity: 1 }],
+    }),
+    /Unknown batch field/
+  );
+});

@@ -65,6 +65,34 @@ function imageStatusPayload(product, trash) {
   };
 }
 
+function productEffectivePolicy(product) {
+  return {
+    effective_serial_tracking_enabled: product.serial_tracking_enabled === true,
+    effective_shop_warranty_enabled: product.shop_warranty_enabled === true,
+    effective_shop_warranty_months: product.shop_warranty_enabled === true
+      ? Number(product.shop_warranty_months)
+      : null,
+    serial_tracking_source: 'product',
+    shop_warranty_source: 'product',
+  };
+}
+
+function variantEffectivePolicy(variant, product) {
+  const serialEnabled = variant.serial_tracking_enabled ?? product.serial_tracking_enabled;
+  const warrantyEnabled = variant.shop_warranty_enabled ?? product.shop_warranty_enabled;
+  return {
+    effective_serial_tracking_enabled: serialEnabled === true,
+    effective_shop_warranty_enabled: warrantyEnabled === true,
+    effective_shop_warranty_months: warrantyEnabled === true
+      ? Number(variant.shop_warranty_enabled === null
+        ? product.shop_warranty_months
+        : variant.shop_warranty_months)
+      : null,
+    serial_tracking_source: variant.serial_tracking_enabled === null ? 'product' : 'variant',
+    shop_warranty_source: variant.shop_warranty_enabled === null ? 'product' : 'variant',
+  };
+}
+
 /**
  * Make sure an SKU does not already exist in either:
  * products
@@ -155,6 +183,8 @@ router.get('/', requireAuth, async (req, res) => {
 
     const products = result.rows.map((product) => ({
       ...product,
+
+      ...productEffectivePolicy(product),
 
       has_variants:
         Number(product.variant_count) > 0,
@@ -251,6 +281,23 @@ router.get(
 
           pv.stock_quantity,
           pv.low_stock_threshold,
+          pv.serial_tracking_enabled,
+          pv.shop_warranty_enabled,
+          pv.shop_warranty_months,
+
+          COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+            AS effective_serial_tracking_enabled,
+          COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            AS effective_shop_warranty_enabled,
+          CASE
+            WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            THEN COALESCE(pv.shop_warranty_months, p.shop_warranty_months)
+            ELSE NULL
+          END AS effective_shop_warranty_months,
+          CASE WHEN pv.serial_tracking_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS serial_tracking_source,
+          CASE WHEN pv.shop_warranty_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS shop_warranty_source,
 
           p.id,
           p.name,
@@ -332,6 +379,7 @@ router.get(
       res.json({
         type: 'product',
         ...product,
+        ...productEffectivePolicy(product),
         has_variants:
           Number(variantCount.rows[0].count) > 0,
       });
@@ -660,7 +708,7 @@ router.post(
 
       return res
         .status(201)
-        .json(product);
+        .json({ ...product, ...productEffectivePolicy(product) });
 
     } catch (err) {
       try {
@@ -763,6 +811,23 @@ router.get(
           pv.stock_quantity,
           pv.low_stock_threshold,
 
+          pv.serial_tracking_enabled,
+          pv.shop_warranty_enabled,
+          pv.shop_warranty_months,
+          COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+            AS effective_serial_tracking_enabled,
+          COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            AS effective_shop_warranty_enabled,
+          CASE
+            WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            THEN COALESCE(pv.shop_warranty_months, p.shop_warranty_months)
+            ELSE NULL
+          END AS effective_shop_warranty_months,
+          CASE WHEN pv.serial_tracking_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS serial_tracking_source,
+          CASE WHEN pv.shop_warranty_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS shop_warranty_source,
+
           p.image_url,
           p.image_path,
 
@@ -832,6 +897,16 @@ router.get(
           p.low_stock_threshold,
           p.image_url,
           p.image_path,
+
+          p.serial_tracking_enabled,
+          p.shop_warranty_enabled,
+          p.shop_warranty_months,
+          p.serial_tracking_enabled AS effective_serial_tracking_enabled,
+          p.shop_warranty_enabled AS effective_shop_warranty_enabled,
+          CASE WHEN p.shop_warranty_enabled THEN p.shop_warranty_months ELSE NULL END
+            AS effective_shop_warranty_months,
+          'product'::text AS serial_tracking_source,
+          'product'::text AS shop_warranty_source,
 
           c.name AS category_name
 
@@ -1176,6 +1251,7 @@ router.put(
           SELECT *
           FROM products
           WHERE id = $1
+          FOR UPDATE
           `,
           [req.params.id]
         );
@@ -1191,10 +1267,25 @@ router.put(
       const existingProduct =
         existingResult.rows[0];
 
+      const nextStockQuantity = stock_quantity === undefined
+        ? existingProduct.stock_quantity
+        : stock_quantity || 0;
+
       if (!existingProduct.is_active) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error: 'Restore the product from the Recycle Bin before editing it',
+        });
+      }
+
+      if (
+        existingProduct.serial_tracking_enabled === true
+        && Number(nextStockQuantity) !== Number(existingProduct.stock_quantity)
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Stock quantity for serialized inventory must be changed through stock-unit operations',
+          code: 'DIRECT_QUANTITY_EDIT_FORBIDDEN',
         });
       }
 
@@ -1309,7 +1400,7 @@ router.put(
 
             cost || 0,
 
-            stock_quantity || 0,
+            nextStockQuantity,
 
             low_stock_threshold ?? 5,
 
@@ -1346,7 +1437,7 @@ router.put(
       }
 
       return res.json(
-        result.rows[0]
+        { ...result.rows[0], ...productEffectivePolicy(result.rows[0]) }
       );
     } catch (err) {
       try {
@@ -1420,6 +1511,24 @@ router.get(
             p.cost
           ) AS effective_cost
 
+          ,COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+            AS effective_serial_tracking_enabled
+
+          ,COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            AS effective_shop_warranty_enabled
+
+          ,CASE
+            WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+            THEN COALESCE(pv.shop_warranty_months, p.shop_warranty_months)
+            ELSE NULL
+          END AS effective_shop_warranty_months
+
+          ,CASE WHEN pv.serial_tracking_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS serial_tracking_source
+
+          ,CASE WHEN pv.shop_warranty_enabled IS NULL THEN 'product' ELSE 'variant' END
+            AS shop_warranty_source
+
         FROM product_variants pv
 
         JOIN products p
@@ -1476,7 +1585,7 @@ router.post(
       const productResult =
         await pool.query(
           `
-          SELECT id
+          SELECT id, serial_tracking_enabled, shop_warranty_enabled, shop_warranty_months
           FROM products
           WHERE id = $1
             AND is_active = TRUE
@@ -1489,6 +1598,16 @@ router.post(
       ) {
         return res.status(404).json({
           error: 'Product not found',
+        });
+      }
+
+      if (
+        productResult.rows[0].serial_tracking_enabled === true
+        && Number(stock_quantity || 0) !== 0
+      ) {
+        return res.status(409).json({
+          error: 'Create serialized variants with zero stock, then receive stock units',
+          code: 'SERIAL_UNIT_REGISTRATION_REQUIRED',
         });
       }
 
@@ -1543,7 +1662,10 @@ router.post(
 
       return res
         .status(201)
-        .json(result.rows[0]);
+        .json({
+          ...result.rows[0],
+          ...variantEffectivePolicy(result.rows[0], productResult.rows[0]),
+        });
     } catch (err) {
       console.error(err);
 
@@ -1608,40 +1730,61 @@ router.put(
 
       const result = await pool.query(
         `
-        UPDATE product_variants
+        UPDATE product_variants pv
 
         SET
           name =
-            COALESCE($1, name),
+            COALESCE($1, pv.name),
 
           sku =
-            COALESCE($2, sku),
+            COALESCE($2, pv.sku),
 
           price =
-            COALESCE($3, price),
+            COALESCE($3, pv.price),
 
           cost =
-            COALESCE($4, cost),
+            COALESCE($4, pv.cost),
 
           stock_quantity =
             COALESCE(
               $5,
-              stock_quantity
+              pv.stock_quantity
             ),
 
           low_stock_threshold =
             COALESCE(
               $6,
-              low_stock_threshold
+              pv.low_stock_threshold
             ),
 
           updated_at = NOW()
 
-        WHERE id = $7
-          AND product_id = $8
-          AND is_active = TRUE
+        FROM products p
 
-        RETURNING *
+        WHERE pv.id = $7
+          AND pv.product_id = $8
+          AND pv.is_active = TRUE
+          AND p.id = pv.product_id
+          AND (
+            COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled) = FALSE
+            OR $5::integer IS NULL
+            OR pv.stock_quantity = $5::integer
+          )
+
+        RETURNING pv.*,
+                  COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+                    AS effective_serial_tracking_enabled,
+                  COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+                    AS effective_shop_warranty_enabled,
+                  CASE
+                    WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+                    THEN COALESCE(pv.shop_warranty_months, p.shop_warranty_months)
+                    ELSE NULL
+                  END AS effective_shop_warranty_months,
+                  CASE WHEN pv.serial_tracking_enabled IS NULL THEN 'product' ELSE 'variant' END
+                    AS serial_tracking_source,
+                  CASE WHEN pv.shop_warranty_enabled IS NULL THEN 'product' ELSE 'variant' END
+                    AS shop_warranty_source
         `,
         [
           name,
@@ -1656,6 +1799,23 @@ router.put(
       );
 
       if (result.rows.length === 0) {
+        const current = await pool.query(
+          `
+            SELECT pv.id,
+                   COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+                     AS effective_serial_tracking_enabled
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE pv.id = $1 AND pv.product_id = $2 AND pv.is_active = TRUE
+          `,
+          [req.params.variantId, req.params.id]
+        );
+        if (current.rows[0]?.effective_serial_tracking_enabled === true) {
+          return res.status(409).json({
+            error: 'Stock quantity for serialized inventory must be changed through stock-unit operations',
+            code: 'DIRECT_QUANTITY_EDIT_FORBIDDEN',
+          });
+        }
         return res.status(404).json({
           error: 'Variant not found',
         });

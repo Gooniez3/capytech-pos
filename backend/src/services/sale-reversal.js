@@ -81,11 +81,14 @@ async function restoreExactInventory(client, items) {
     if (item.variant_id != null) {
       result = await client.query(
         `
-          UPDATE product_variants
+          UPDATE product_variants pv
           SET
-            stock_quantity = stock_quantity + $1,
+            stock_quantity = pv.stock_quantity + $1,
             updated_at = NOW()
-          WHERE id = $2
+          FROM products p
+          WHERE pv.id = $2
+            AND p.id = pv.product_id
+            AND COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled) = FALSE
         `,
         [item.quantity, item.variant_id]
       );
@@ -97,6 +100,7 @@ async function restoreExactInventory(client, items) {
             stock_quantity = stock_quantity + $1,
             updated_at = NOW()
           WHERE id = $2
+            AND serial_tracking_enabled = FALSE
         `,
         [item.quantity, item.product_id]
       );
@@ -104,7 +108,7 @@ async function restoreExactInventory(client, items) {
 
     if (result.rowCount !== 1) {
       throw new SaleReversalError(
-        'Inventory restoration could not be completed; manual reconciliation is required',
+        'Inventory restoration is blocked for serialized or missing inventory; use the serialized return workflow',
         409
       );
     }

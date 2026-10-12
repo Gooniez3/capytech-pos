@@ -368,6 +368,53 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
   assert.equal(released, true);
 });
 
+for (const target of ['product', 'variant']) {
+  test(`legacy checkout fails closed for a serialized ${target}`, async () => {
+    const key = target === 'product'
+      ? '133e4567-e89b-42d3-a456-426614174000'
+      : '143e4567-e89b-42d3-a456-426614174000';
+    const queries = [];
+    const client = {
+      async query(sql) {
+        queries.push(sql);
+        if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+        if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+        if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
+        if (target === 'product' && sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
+          return { rows: [{
+            id: 12, name: 'Serialized Mouse', price: '100', cost: '50',
+            stock_quantity: 1, low_stock_threshold: 2, serial_tracking_enabled: true,
+          }] };
+        }
+        if (target === 'variant' && sql.includes('FROM product_variants')) {
+          return { rows: [{
+            variant_id: 31, product_id: 12, product_name: 'Serialized Mouse',
+            variant_name: 'Black', price: '100', cost: '50', stock_quantity: 1,
+            low_stock_threshold: 2, serial_tracking_enabled: true,
+          }] };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+      release() {},
+    };
+
+    await withMockPool({
+      query: async () => ({ rows: [] }),
+      connect: async () => client,
+    }, async () => {
+      const body = validCheckoutBody(key);
+      if (target === 'variant') body.items[0].variant_id = 31;
+      const response = responseRecorder();
+      await checkoutHandler()({ body, user: { id: 7 } }, response);
+      assert.equal(response.statusCode, 409);
+      assert.match(response.body.error, /serialized inventory/);
+    });
+
+    assert.equal(queries.some(sql => /UPDATE (products|product_variants)/.test(sql)), false);
+    assert.equal(queries.some(sql => sql.includes('INSERT INTO sales')), false);
+  });
+}
+
 test('duplicate checkout targets create one decrement and one sale item', async () => {
   const key = '223e4567-e89b-42d3-a456-426614174000';
   const queries = [];

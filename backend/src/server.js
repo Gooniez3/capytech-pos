@@ -40,6 +40,15 @@ const settingsRoutes =
 const notificationRoutes =
   require('./routes/notifications');
 
+const inventoryPolicyRoutes =
+  require('./routes/inventory-policies');
+
+const stockUnitRoutes =
+  require('./routes/stock-units');
+
+const warrantyLookupRoutes =
+  require('./routes/warranty-lookup');
+
 const { requireAuth } = require('./middleware/auth');
 const {
   getLanIPv4,
@@ -102,7 +111,22 @@ app.use(
 
 app.use(
   '/api/products',
+  inventoryPolicyRoutes
+);
+
+app.use(
+  '/api/products',
   productRoutes
+);
+
+app.use(
+  '/api/stock-units',
+  stockUnitRoutes
+);
+
+app.use(
+  '/api/warranty-lookup',
+  warrantyLookupRoutes
 );
 
 app.use(

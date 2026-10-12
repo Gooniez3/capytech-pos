@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const {
+  SaleReversalError,
   assertSaleCanBeReversed,
   assertSaleItemsCanBeReversed,
   revalidateCurrentAdmin,
@@ -30,6 +31,14 @@ const {
 } = require('../services/warranty');
 
 const router = express.Router();
+
+function rejectLegacySerializedCheckout(targetName) {
+  const error = new CheckoutValidationError(
+    `${targetName} uses serialized inventory and must be sold through stock-unit checkout`
+  );
+  error.statusCode = 409;
+  throw error;
+}
 
 // Generates a simple sequential invoice number like INV-000123
 async function generateInvoiceNumber(client) {
@@ -381,6 +390,8 @@ router.post('/', requireAuth, async (req, res) => {
               pv.sku AS variant_sku,
               pv.stock_quantity,
               pv.low_stock_threshold,
+              COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+                AS serial_tracking_enabled,
 
               COALESCE(
   pv.price,
@@ -419,6 +430,12 @@ p.name AS product_name
         if (!variant) {
           throw new CheckoutValidationError(
             `Variant ${item.variant_id} not found`
+          );
+        }
+
+        if (variant.serial_tracking_enabled === true) {
+          rejectLegacySerializedCheckout(
+            `${variant.product_name} - ${variant.variant_name}`
           );
         }
 
@@ -494,7 +511,8 @@ continue;
             price,
             cost,
             stock_quantity,
-            low_stock_threshold
+            low_stock_threshold,
+            serial_tracking_enabled
 
           FROM products
 
@@ -513,6 +531,10 @@ continue;
         throw new CheckoutValidationError(
           `Product ${item.product_id} not found`
         );
+      }
+
+      if (product.serial_tracking_enabled === true) {
+        rejectLegacySerializedCheckout(product.name);
       }
 
       /*
@@ -979,7 +1001,7 @@ router.post(
       const sale = saleResult.rows[0];
 
       if (!sale) {
-        throw new Error('Sale not found');
+        throw new SaleReversalError('Sale not found', 404);
       }
 
       assertSaleCanBeReversed(sale, 'void');
@@ -1036,13 +1058,11 @@ router.post(
     } catch (err) {
       await client.query('ROLLBACK');
 
-      console.error(err);
-
-      res.status(err.statusCode || 400).json({
-        error:
-          err.message ||
-          'Failed to void sale',
-      });
+      if (err.statusCode) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+      console.error('Failed to void sale:', err);
+      return res.status(500).json({ error: 'Failed to void sale' });
     } finally {
       client.release();
     }
@@ -1119,9 +1139,7 @@ router.post(
         saleResult.rows[0];
 
       if (!sale) {
-        throw new Error(
-          'Sale not found'
-        );
+        throw new SaleReversalError('Sale not found', 404);
       }
 
       /*
@@ -1304,16 +1322,11 @@ await createRefundNotifications(
         'ROLLBACK'
       );
 
-      console.error(
-        'Refund error:',
-        err
-      );
-
-      res.status(err.statusCode || 400).json({
-        error:
-          err.message ||
-          'Failed to refund sale',
-      });
+      if (err.statusCode) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+      console.error('Refund error:', err);
+      return res.status(500).json({ error: 'Failed to refund sale' });
     } finally {
       client.release();
     }

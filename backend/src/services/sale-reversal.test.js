@@ -30,6 +30,7 @@ test('refund restoration updates the exact product once', async () => {
   await restoreExactInventory(client, [{ product_id: 4, variant_id: null, quantity: 3 }]);
 
   assert.match(client.queries[0].sql, /UPDATE products/);
+  assert.match(client.queries[0].sql, /serial_tracking_enabled = FALSE/);
   assert.deepEqual(client.queries[0].values, [3, 4]);
 });
 
@@ -39,6 +40,7 @@ test('refund restoration updates the exact variant once', async () => {
   await restoreExactInventory(client, [{ product_id: 4, variant_id: 9, quantity: 2 }]);
 
   assert.match(client.queries[0].sql, /UPDATE product_variants/);
+  assert.match(client.queries[0].sql, /COALESCE\(pv\.serial_tracking_enabled, p\.serial_tracking_enabled\) = FALSE/);
   assert.deepEqual(client.queries[0].values, [2, 9]);
 });
 
@@ -58,6 +60,17 @@ test('a missing inventory row fails closed after its update affects zero rows', 
   await assert.rejects(
     restoreExactInventory(client, [{ product_id: 4, variant_id: null, quantity: 1 }]),
     error => error instanceof SaleReversalError && error.statusCode === 409
+  );
+  assert.equal(client.queries.length, 1);
+});
+
+test('serialized inventory restoration fails closed without a quantity change', async () => {
+  const client = clientWithResults([{ rowCount: 0, rows: [] }]);
+
+  await assert.rejects(
+    restoreExactInventory(client, [{ product_id: 4, variant_id: null, quantity: 1 }]),
+    error => error instanceof SaleReversalError &&
+      error.statusCode === 409 && /serialized return workflow/.test(error.message)
   );
   assert.equal(client.queries.length, 1);
 });
