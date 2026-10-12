@@ -11,6 +11,7 @@ const {
 } = require('./checkout-validation');
 
 const CheckoutIntentError = CheckoutValidationError;
+const { loadSaleItemsWithStockUnits } = require('./sale-read-model');
 
 class CheckoutIdempotencyConflictError extends Error {
   constructor(message) {
@@ -35,6 +36,7 @@ function canonicalizeCheckoutIntent({
   customer_email,
   customer_address,
   warranty_months,
+  checkout_contract_version,
 }) {
   const normalized = normalizeCheckoutIntent({
     items,
@@ -46,10 +48,11 @@ function canonicalizeCheckoutIntent({
     customer_email,
     customer_address,
     warranty_months,
+    checkout_contract_version,
   });
 
   return {
-    version: 1,
+    version: normalized.checkout_contract_version,
     user_id: normalizeRequiredInteger(user_id, 'user_id'),
     items: normalized.items,
     payment_method: normalized.payment_method,
@@ -111,19 +114,9 @@ async function findExistingCheckout(queryable, idempotencyKey, fingerprint) {
 
   assertCheckoutFingerprintMatches(sale, fingerprint);
 
-  const itemsResult = await queryable.query(
-    `
-      SELECT *
-      FROM sale_items
-      WHERE sale_id = $1
-      ORDER BY id
-    `,
-    [sale.id]
-  );
-
   return {
     sale,
-    items: itemsResult.rows,
+    items: await loadSaleItemsWithStockUnits(queryable, sale.id),
   };
 }
 

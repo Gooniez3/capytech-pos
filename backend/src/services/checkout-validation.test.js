@@ -34,6 +34,36 @@ test('accepts a normal plain checkout body', () => {
   assert.equal(validateCheckoutRequest(validBody()).items[0].quantity, 1);
 });
 
+test('v2 checkout normalizes and sorts exact stock-unit IDs', () => {
+  const result = validateCheckoutRequest({
+    ...validBody(),
+    checkout_contract_version: 2,
+    items: [{ product_id: 5, quantity: 2, stock_unit_ids: ['20', 3] }],
+  });
+  assert.equal(result.checkout_contract_version, 2);
+  assert.deepEqual(result.items[0].stock_unit_ids, ['3', '20']);
+});
+
+test('v2 checkout rejects duplicate units, duplicate targets, and unknown fields', () => {
+  assert.throws(() => validateCheckoutRequest({
+    ...validBody(), checkout_contract_version: 2,
+    items: [
+      { product_id: 5, quantity: 1, stock_unit_ids: [3] },
+      { product_id: 6, quantity: 1, stock_unit_ids: [3] },
+    ],
+  }), /unique across the cart/);
+  assert.throws(() => validateCheckoutRequest({
+    ...validBody(), checkout_contract_version: 2,
+    items: [
+      { product_id: 5, quantity: 1 },
+      { product_id: 5, quantity: 1 },
+    ],
+  }), /targets must be unique/);
+  assert.throws(() => validateCheckoutRequest({
+    ...validBody(), checkout_contract_version: 2, warranty_months: 12,
+  }), /Unknown checkout field/);
+});
+
 for (const [name, body] of [
   ['null', null],
   ['array', []],

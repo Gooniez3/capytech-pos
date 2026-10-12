@@ -271,11 +271,66 @@ function normalizeItems(items) {
   );
 }
 
+function normalizeStockUnitId(value) {
+  const text = String(value ?? '');
+  if (!/^[1-9]\d*$/.test(text)) {
+    throw new CheckoutValidationError('stock_unit_ids must contain positive integer IDs');
+  }
+  return text;
+}
+
+function normalizeV2Items(items) {
+  if (!Array.isArray(items) || items.length === 0) throw new CheckoutValidationError('Cart is empty');
+  if (items.length > MAX_CHECKOUT_LINES) {
+    throw new CheckoutValidationError(`Checkout cannot contain more than ${MAX_CHECKOUT_LINES} lines`);
+  }
+  const allowed = new Set(['product_id', 'variant_id', 'quantity', 'stock_unit_ids']);
+  const targets = new Map();
+  const allUnitIds = new Set();
+  for (const rawItem of items) {
+    assertPlainObject(rawItem, 'Each checkout item');
+    const unknown = Object.keys(rawItem).find((key) => !allowed.has(key));
+    if (unknown) throw new CheckoutValidationError(`Unknown checkout item field: ${unknown}`);
+    const productId = normalizeRequiredInteger(rawItem.product_id, 'product_id');
+    const variantId = normalizeOptionalInteger(rawItem.variant_id, 'variant_id');
+    const quantity = normalizeRequiredInteger(rawItem.quantity, 'quantity');
+    const unitIds = rawItem.stock_unit_ids === undefined ? [] : rawItem.stock_unit_ids;
+    if (!Array.isArray(unitIds)) throw new CheckoutValidationError('stock_unit_ids must be an array');
+    const normalizedIds = unitIds.map(normalizeStockUnitId);
+    for (const id of normalizedIds) {
+      if (allUnitIds.has(id)) throw new CheckoutValidationError('Stock unit IDs must be unique across the cart');
+      allUnitIds.add(id);
+    }
+    const key = `${productId}:${variantId === null ? 'null' : variantId}`;
+    if (targets.has(key)) throw new CheckoutValidationError('V2 checkout inventory targets must be unique');
+    targets.set(key, {
+      product_id: productId,
+      variant_id: variantId,
+      quantity,
+      stock_unit_ids: normalizedIds.sort((left, right) => {
+        const a = BigInt(left); const b = BigInt(right);
+        return a < b ? -1 : a > b ? 1 : 0;
+      }),
+    });
+  }
+  return [...targets.values()].sort((left, right) =>
+    left.product_id - right.product_id ||
+    (left.variant_id === right.variant_id ? 0 : left.variant_id === null ? -1 : right.variant_id === null ? 1 : left.variant_id - right.variant_id)
+  );
+}
+
 function normalizeCheckoutIntent(input) {
   assertPlainObject(input);
+  const contractVersion = input.checkout_contract_version === undefined
+    ? 1
+    : normalizeRequiredInteger(input.checkout_contract_version, 'checkout_contract_version');
+  if (![1, 2].includes(contractVersion)) {
+    throw new CheckoutValidationError('checkout_contract_version must be 1 or 2');
+  }
   const discount = normalizeDiscount(input.discount);
   return {
-    items: normalizeItems(input.items),
+    checkout_contract_version: contractVersion,
+    items: contractVersion === 2 ? normalizeV2Items(input.items) : normalizeItems(input.items),
     payment_method: normalizePaymentMethod(input.payment_method),
     discount: discount.canonical,
     discount_minor_units: discount.minorUnits,
@@ -297,6 +352,16 @@ function normalizeCheckoutIntent(input) {
 
 function validateCheckoutRequest(body) {
   assertPlainObject(body);
+  const requestedVersion = body.checkout_contract_version === undefined
+    ? 1 : normalizeRequiredInteger(body.checkout_contract_version, 'checkout_contract_version');
+  if (requestedVersion === 2) {
+    const allowed = new Set([
+      'checkout_contract_version', 'idempotency_key', 'items', 'payment_method', 'discount',
+      'customer_id', 'customer_name', 'customer_phone', 'customer_email', 'customer_address',
+    ]);
+    const unknown = Object.keys(body).find((key) => !allowed.has(key));
+    if (unknown) throw new CheckoutValidationError(`Unknown checkout field: ${unknown}`);
+  }
   return {
     idempotency_key: normalizeRequiredIdempotencyKey(body.idempotency_key),
     ...normalizeCheckoutIntent(body),
@@ -388,6 +453,7 @@ module.exports = {
   normalizeCheckoutIntent,
   normalizeDiscount,
   normalizeItems,
+  normalizeV2Items,
   normalizeOptionalInteger,
   normalizePaymentMethod,
   normalizeRequiredIdempotencyKey,

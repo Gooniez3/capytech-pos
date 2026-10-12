@@ -29,6 +29,14 @@ const {
   normalizeWarrantySelection,
   suggestWarrantyMonths,
 } = require('../services/warranty');
+const { attachTransaction, assertTransactionCanCommit } = require('../services/domain-transaction');
+const {
+  lockInventoryTargets,
+  quarantineSoldUnits,
+  sellStockUnits,
+} = require('../services/stock-unit-service');
+const { buildShopWarrantySnapshot } = require('../services/shop-warranty-period');
+const { loadSaleItemsWithStockUnits } = require('../services/sale-read-model');
 
 const router = express.Router();
 
@@ -217,6 +225,69 @@ async function createRefundNotifications(
   }
 }
 
+async function reverseSaleInventory(client, transaction, items, {
+  action, saleId, actorUserId, reason = null,
+}) {
+  const unique = new Map();
+  for (const item of items) {
+    const key = `${item.product_id}:${item.variant_id ?? 'null'}`;
+    unique.set(key, { productId: item.product_id, variantId: item.variant_id });
+  }
+  const targets = await lockInventoryTargets(client, [...unique.values()], {
+    requireActive: false,
+    enforceVariantTarget: false,
+  });
+  const targetMap = new Map(targets.map((target) => [target.key, target]));
+  const assignments = await client.query(
+    `
+      SELECT sis.stock_unit_id, sis.sale_item_id
+      FROM sale_item_stock_units sis
+      JOIN sale_items si ON si.id = sis.sale_item_id
+      WHERE si.sale_id = $1 AND sis.released_at IS NULL
+      ORDER BY sis.stock_unit_id
+    `,
+    [saleId]
+  );
+  const unitsByItem = new Map();
+  for (const row of assignments.rows) {
+    const key = String(row.sale_item_id);
+    if (!unitsByItem.has(key)) unitsByItem.set(key, []);
+    unitsByItem.get(key).push(String(row.stock_unit_id));
+  }
+  const serializedUnitIds = [];
+  const untrackedItems = [];
+  for (const item of items) {
+    const key = `${Number(item.product_id)}:${item.variant_id == null ? 'null' : Number(item.variant_id)}`;
+    const target = targetMap.get(key);
+    const unitIds = unitsByItem.get(String(item.id)) || [];
+    // Active assignments prove that this was a serialized sale. Current
+    // tracking policy is also checked so a legacy return cannot silently break
+    // reconciliation after that inventory target has been adopted as serialized.
+    const serialized = target?.policy.serialTrackingEnabled === true || unitIds.length > 0;
+    if (serialized) {
+      if (unitIds.length !== Number(item.quantity)) {
+        throw new SaleReversalError(
+          'Serialized sale assignments are incomplete; manual reconciliation is required',
+          409
+        );
+      }
+      serializedUnitIds.push(...unitIds);
+    } else {
+      untrackedItems.push(item);
+    }
+  }
+  if (serializedUnitIds.length > 0) {
+    await quarantineSoldUnits(transaction, {
+      unitIds: serializedUnitIds,
+      action,
+      saleId,
+      actorUserId,
+      reason,
+    });
+  }
+  if (untrackedItems.length > 0) await restoreExactInventory(client, untrackedItems);
+}
+
 router.post('/', requireAuth, async (req, res) => {
   let checkoutRequest;
 
@@ -240,6 +311,7 @@ router.post('/', requireAuth, async (req, res) => {
     customer_address,
     warranty_months: requestedWarrantyMonths,
     idempotency_key: idempotencyKey,
+    checkout_contract_version: checkoutContractVersion,
   } = checkoutRequest;
 
   let checkoutFingerprint;
@@ -256,6 +328,7 @@ router.post('/', requireAuth, async (req, res) => {
       customer_email,
       customer_address,
       warranty_months: requestedWarrantyMonths,
+      checkout_contract_version: checkoutContractVersion,
     });
 
     const existingCheckout = await findExistingCheckout(
@@ -288,6 +361,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
   client = await pool.connect();
   await client.query('BEGIN');
+  const domainTransaction = attachTransaction(client);
 
   /*
    * =====================================================
@@ -392,6 +466,11 @@ router.post('/', requireAuth, async (req, res) => {
               pv.low_stock_threshold,
               COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
                 AS serial_tracking_enabled,
+              COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+                AS shop_warranty_enabled,
+              COALESCE(pv.shop_warranty_months, p.shop_warranty_months)
+                AS shop_warranty_months,
+              p.sku AS product_sku,
 
               COALESCE(
   pv.price,
@@ -433,10 +512,18 @@ p.name AS product_name
           );
         }
 
-        if (variant.serial_tracking_enabled === true) {
+        if (checkoutContractVersion === 1 && variant.serial_tracking_enabled === true) {
           rejectLegacySerializedCheckout(
             `${variant.product_name} - ${variant.variant_name}`
           );
+        }
+        if (checkoutContractVersion === 2) {
+          if (variant.serial_tracking_enabled === true && item.stock_unit_ids.length !== quantity) {
+            throw new CheckoutValidationError('Serialized item quantity must equal selected stock-unit count');
+          }
+          if (variant.serial_tracking_enabled !== true && item.stock_unit_ids.length !== 0) {
+            throw new CheckoutValidationError('Untracked items must not include stock-unit IDs');
+          }
         }
 
         if (
@@ -480,9 +567,17 @@ p.name AS product_name
           unit_cost: minorUnitsToDatabaseDecimal(unitCostMinorUnits),
           unit_price: minorUnitsToDatabaseDecimal(unitPriceMinorUnits),
           line_total: minorUnitsToDatabaseDecimal(lineTotalMinorUnits),
+          product_sku: variant.product_sku,
+          stock_unit_ids: item.stock_unit_ids || [],
+          serial_tracking_enabled: variant.serial_tracking_enabled === true,
+          warranty_policy: {
+            shopWarrantyEligible: variant.shop_warranty_enabled === true,
+            shopWarrantyMonths: variant.shop_warranty_enabled === true
+              ? Number(variant.shop_warranty_months) : null,
+          },
         });
 
-        inventoryMutations.push({
+        if (variant.serial_tracking_enabled !== true) inventoryMutations.push({
           table: 'product_variants',
           id: variant.variant_id,
           quantity,
@@ -512,7 +607,9 @@ continue;
             cost,
             stock_quantity,
             low_stock_threshold,
-            serial_tracking_enabled
+            serial_tracking_enabled,
+            shop_warranty_enabled,
+            shop_warranty_months
 
           FROM products
 
@@ -533,8 +630,16 @@ continue;
         );
       }
 
-      if (product.serial_tracking_enabled === true) {
+      if (checkoutContractVersion === 1 && product.serial_tracking_enabled === true) {
         rejectLegacySerializedCheckout(product.name);
+      }
+      if (checkoutContractVersion === 2) {
+        if (product.serial_tracking_enabled === true && item.stock_unit_ids.length !== quantity) {
+          throw new CheckoutValidationError('Serialized item quantity must equal selected stock-unit count');
+        }
+        if (product.serial_tracking_enabled !== true && item.stock_unit_ids.length !== 0) {
+          throw new CheckoutValidationError('Untracked items must not include stock-unit IDs');
+        }
       }
 
       /*
@@ -603,9 +708,17 @@ continue;
         unit_cost: minorUnitsToDatabaseDecimal(unitCostMinorUnits),
         unit_price: minorUnitsToDatabaseDecimal(unitPriceMinorUnits),
         line_total: minorUnitsToDatabaseDecimal(lineTotalMinorUnits),
+        product_sku: product.sku,
+        stock_unit_ids: item.stock_unit_ids || [],
+        serial_tracking_enabled: product.serial_tracking_enabled === true,
+        warranty_policy: {
+          shopWarrantyEligible: product.shop_warranty_enabled === true,
+          shopWarrantyMonths: product.shop_warranty_enabled === true
+            ? Number(product.shop_warranty_months) : null,
+        },
       });
 
-      inventoryMutations.push({
+      if (product.serial_tracking_enabled !== true) inventoryMutations.push({
         table: 'products',
         id: product.id,
         quantity,
@@ -615,6 +728,37 @@ continue;
         variantName: null,
       });
   }
+
+    if (checkoutContractVersion === 2) {
+      for (const item of lineItems.filter((entry) => entry.serial_tracking_enabled)) {
+        const units = await client.query(
+          `
+            SELECT su.id, su.product_id, su.variant_id, su.state,
+                   EXISTS (
+                     SELECT 1 FROM sale_item_stock_units sis
+                     WHERE sis.stock_unit_id = su.id AND sis.released_at IS NULL
+                   ) AS assigned
+            FROM stock_units su
+            WHERE su.id = ANY($1::bigint[])
+            ORDER BY su.id
+            FOR UPDATE
+          `,
+          [item.stock_unit_ids]
+        );
+        if (units.rows.length !== item.stock_unit_ids.length || units.rows.some((unit) =>
+          Number(unit.product_id) !== Number(item.product_id)
+          || (unit.variant_id === null ? null : Number(unit.variant_id)) !== item.variant_id
+          || unit.state !== 'available'
+          || unit.assigned === true
+        )) {
+          const error = new CheckoutValidationError(
+            'Selected stock units are unavailable or do not match the checkout item'
+          );
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+    }
 
     /*
      * =====================================================
@@ -652,8 +796,9 @@ continue;
     const discountAmount = minorUnitsToDatabaseDecimal(discountMinorUnits);
     const taxAmount = minorUnitsToDatabaseDecimal(taxMinorUnits);
     const total = minorUnitsToDatabaseDecimal(totalMinorUnits);
-    const warrantyMonths =
-      requestedWarrantyMonths === null
+    const warrantyMonths = checkoutContractVersion === 2
+      ? null
+      : requestedWarrantyMonths === null
         ? suggestWarrantyMonths(totalMinorUnits)
         : requestedWarrantyMonths;
 
@@ -710,6 +855,7 @@ continue;
       tax,
       total,
       payment_method,
+      checkout_contract_version,
       idempotency_key,
       checkout_request_fingerprint,
       warranty_months
@@ -718,9 +864,9 @@ continue;
       $1, $2, $3,
       $4, $5, $6, $7,
       $8, $9, $10, $11,
-      $12, $13, $14, $15
+      $12, $13, $14, $15, $16
     )
-    RETURNING *
+    RETURNING *, created_at::date::text AS purchase_date
   `,
   [
     invoiceNumber,
@@ -738,6 +884,7 @@ continue;
     total,
     paymentMethod,
 
+    checkoutContractVersion === 2 ? 2 : null,
     idempotencyKey,
     checkoutFingerprint,
     warrantyMonths,
@@ -754,7 +901,13 @@ continue;
      */
 
     for (const item of lineItems) {
-  await client.query(
+      const snapshot = checkoutContractVersion === 2
+        ? buildShopWarrantySnapshot(item.warranty_policy, sale.purchase_date)
+        : {
+          shopWarrantyEligible: null, shopWarrantyMonths: null,
+          shopWarrantyStartDate: null, shopWarrantyEndDate: null,
+        };
+  const savedItemResult = await client.query(
     `
     INSERT INTO sale_items
     (
@@ -767,15 +920,20 @@ continue;
       quantity,
       unit_cost,
       unit_price,
-      line_total
+      line_total,
+      shop_warranty_eligible, shop_warranty_months,
+      shop_warranty_start_date, shop_warranty_end_date,
+      product_sku_snapshot, variant_sku_snapshot
     )
 
     VALUES
     (
       $1, $2, $3,
       $4, $5, $6,
-      $7, $8, $9, $10
+      $7, $8, $9, $10,
+      $11, $12, $13, $14, $15, $16
     )
+    RETURNING *
     `,
     [
       sale.id,
@@ -788,15 +946,33 @@ continue;
       item.unit_cost,
       item.unit_price,
       item.line_total,
+      snapshot.shopWarrantyEligible,
+      snapshot.shopWarrantyMonths,
+      snapshot.shopWarrantyStartDate,
+      snapshot.shopWarrantyEndDate,
+      checkoutContractVersion === 2 ? item.product_sku : null,
+      checkoutContractVersion === 2 ? item.variant_sku : null,
     ]
   );
+      if (checkoutContractVersion === 2 && item.serial_tracking_enabled) {
+        await sellStockUnits(domainTransaction, {
+          unitIds: item.stock_unit_ids,
+          saleId: sale.id,
+          saleItemId: savedItemResult.rows[0].id,
+          actorUserId: req.user.id,
+        });
+      }
 }
 
+    assertTransactionCanCommit(domainTransaction);
+    const responseItems = checkoutContractVersion === 2
+      ? await loadSaleItemsWithStockUnits(client, sale.id)
+      : lineItems;
     await client.query('COMMIT');
 
     res.status(201).json({
       sale,
-      items: lineItems,
+      items: responseItems,
     });
   } catch (err) {
     if (client) {
@@ -843,33 +1019,9 @@ ORDER BY s.created_at DESC
     const result = [];
 
     for (const sale of salesResult.rows) {
-      const itemsResult = await pool.query(
-        `
-        SELECT
-          id,
-          sale_id,
-          product_id,
-          variant_id,
-          product_name,
-          variant_name,
-          variant_sku,
-          quantity,
-          unit_cost,
-          unit_price,
-          line_total
-
-        FROM sale_items
-
-        WHERE sale_id = $1
-
-        ORDER BY id
-        `,
-        [sale.id]
-      );
-
       result.push({
         ...sale,
-        items: itemsResult.rows,
+        items: await loadSaleItemsWithStockUnits(pool, sale.id),
       });
     }
 
@@ -984,6 +1136,7 @@ router.post(
 
     try {
       await client.query('BEGIN');
+      const domainTransaction = attachTransaction(client);
 
       await revalidateCurrentAdmin(client, req.user.id);
 
@@ -1017,7 +1170,10 @@ router.post(
       );
 
       assertSaleItemsCanBeReversed(itemsResult.rows, 'void');
-      await restoreExactInventory(client, itemsResult.rows);
+      await reverseSaleInventory(client, domainTransaction, itemsResult.rows, {
+        action: 'voided', saleId: sale.id, actorUserId: req.user.id,
+        reason: 'sale voided',
+      });
 
       // Mark sale as voided
       await client.query(
@@ -1049,6 +1205,7 @@ router.post(
         ]
       );
 
+      assertTransactionCanCommit(domainTransaction);
       await client.query('COMMIT');
 
       res.json({
@@ -1115,6 +1272,7 @@ router.post(
        */
 
       await client.query('BEGIN');
+      const domainTransaction = attachTransaction(client);
 
       await revalidateCurrentAdmin(client, req.user.id);
 
@@ -1174,7 +1332,10 @@ router.post(
        * =====================================================
        */
 
-      await restoreExactInventory(client, itemsResult.rows);
+      await reverseSaleInventory(client, domainTransaction, itemsResult.rows, {
+        action: 'refunded', saleId: sale.id, actorUserId: req.user.id,
+        reason: refundReason,
+      });
 
       /* =====================================================
    LOAD REFUNDING USER
@@ -1236,6 +1397,7 @@ const refundedByName =
        * =====================================================
        */
 
+      assertTransactionCanCommit(domainTransaction);
       await client.query(
         `
           INSERT INTO audit_log
@@ -1357,6 +1519,7 @@ router.get(
       s.total,
       s.payment_method,
       s.warranty_months,
+      s.checkout_contract_version,
       s.status,
       s.created_at,
 
@@ -1397,27 +1560,7 @@ router.get(
       // ---------------------------------
       // 2. Load invoice items
       // ---------------------------------
-      const itemsResult = await pool.query(
-        `
-        SELECT
-          id,
-          product_id,
-          variant_id,
-          product_name,
-          variant_name,
-          variant_sku,
-          quantity,
-          unit_price,
-          line_total
-
-        FROM sale_items
-
-        WHERE sale_id = $1
-
-        ORDER BY id
-        `,
-        [req.params.id]
-      );
+      const invoiceItems = await loadSaleItemsWithStockUnits(pool, req.params.id);
 
       // ---------------------------------
       // 3. Return invoice
@@ -1471,6 +1614,9 @@ subtotal:
             ? null
             : Number(sale.warranty_months),
 
+        checkoutContractVersion: sale.checkout_contract_version === null
+          ? null : Number(sale.checkout_contract_version),
+
         refundedAt:
   sale.refunded_at,
 
@@ -1483,7 +1629,7 @@ refundedBy:
 voidedAt:
   sale.voided_at,
 
-        items: itemsResult.rows.map(
+        items: invoiceItems.map(
   (item) => ({
     id: String(item.id),
 
@@ -1514,6 +1660,22 @@ voidedAt:
 
     lineTotal:
       Number(item.line_total),
+
+    shopWarrantyEligible: item.shop_warranty_eligible,
+    shopWarrantyMonths: item.shop_warranty_months === null
+      ? null : Number(item.shop_warranty_months),
+    shopWarrantyStartDate: item.shop_warranty_start_date,
+    shopWarrantyEndDate: item.shop_warranty_end_date,
+    productSku: item.product_sku_snapshot,
+    variantSku: item.variant_sku_snapshot,
+    stockUnits: item.stock_units.map((unit) => ({
+      id: String(unit.stock_unit_id),
+      internalSku: unit.internal_sku_snapshot,
+      serialNumber: unit.manufacturer_serial_number_snapshot,
+      state: unit.current_state,
+      releasedAt: unit.released_at,
+      releaseReason: unit.release_reason,
+    })),
   })
 ),
       });

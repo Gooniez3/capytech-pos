@@ -18,6 +18,7 @@
     "test:stock-unit-integration": "node --test scripts/stock-unit-service.integration.test.mjs",
     "test:inventory-api": "node --test src/services/inventory-api.test.js",
     "test:inventory-api-integration": "node --test scripts/inventory-api.integration.test.mjs",
+    "test:serialized-checkout-integration": "node --test scripts/serialized-checkout.integration.test.mjs",
     "test:refund-void": "node --test src/services/sale-reversal.test.js",
     "test:product-recycle-bin": "node --test src/services/product-recycle-bin.test.js",
     "test:checkout-idempotency": "node --test src/services/checkout-fingerprint.test.js",

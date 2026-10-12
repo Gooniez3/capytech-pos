@@ -860,6 +860,7 @@ module.exports = {
   adoptExistingInventory,
   assertLifecycleTransition,
   checkInventoryReconciliation,
+  lockInventoryTargets,
   registerReceivedUnits,
   releaseQuarantinedUnits,
   retireStockUnits,

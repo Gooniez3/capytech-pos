@@ -145,6 +145,27 @@ test('walk-in snapshot fields remain part of the fingerprint when no customer is
   assert.notEqual(digest(walkIn), digest(renamed));
 });
 
+test('v2 fingerprint includes contract version and canonical selected unit IDs', () => {
+  const base = {
+    user_id: 7, checkout_contract_version: 2,
+    items: [{ product_id: 12, quantity: 2, stock_unit_ids: ['9', '3'] }],
+    payment_method: 'cash',
+  };
+  const reordered = {
+    ...base,
+    items: [{ product_id: 12, quantity: 2, stock_unit_ids: ['3', '9'] }],
+  };
+  const changed = {
+    ...base,
+    items: [{ product_id: 12, quantity: 2, stock_unit_ids: ['3', '10'] }],
+  };
+  assert.equal(digest(base), digest(reordered));
+  assert.notEqual(digest(base), digest(changed));
+  assert.notEqual(digest(base), digest({
+    user_id: 7, items: [{ product_id: 12, quantity: 2 }], payment_method: 'cash',
+  }));
+});
+
 function queryClient(results) {
   const queries = [];
   return {
@@ -166,7 +187,7 @@ test('same key and fingerprint returns the original sale and items', async () =>
 
   assert.deepEqual(
     await findExistingCheckout(client, 'same-key', fingerprint),
-    { sale, items }
+    { sale, items: items.map((item) => ({ ...item, stock_units: [] })) }
   );
   assert.equal(client.queries.length, 2);
 });
@@ -723,7 +744,7 @@ test('checkout without a customer still creates a sale', async () => {
 
   const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
   assert.equal(saleInsert.values[2], null);
-  assert.equal(saleInsert.values[14], 0);
+  assert.equal(saleInsert.values[15], 0);
   assert.equal(queries.some(entry => entry.sql.includes('FROM customers')), false);
 });
 
@@ -740,7 +761,7 @@ test('staff-selected warranty is persisted with the new sale', async () => {
 
   const saleInsert = queries.find(entry => entry.sql.includes('INSERT INTO sales'));
   assert.match(saleInsert.sql, /warranty_months/);
-  assert.equal(saleInsert.values[14], 12);
+  assert.equal(saleInsert.values[15], 12);
 });
 
 test('same key and same request returns the original sale without a second stock update', async () => {
@@ -775,7 +796,7 @@ test('same key and same request returns the original sale without a second stock
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.duplicate, true);
     assert.equal(response.body.sale.id, 41);
-    assert.deepEqual(response.body.items, items);
+    assert.deepEqual(response.body.items, items.map((item) => ({ ...item, stock_units: [] })));
   });
 
   assert.equal(connectCalls, 0);
