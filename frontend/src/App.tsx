@@ -15,6 +15,8 @@ import { SettingsPage } from '@/pages/SettingsPage';
 import type { ReactNode } from 'react';
 import { InvoicePage } from '@/pages/InvoicePage';
 import { PhoneScannerPage } from '@/pages/PhoneScannerPage';
+import { StockUnitsPage } from '@/pages/StockUnitsPage';
+import { WarrantyLookupPage } from '@/pages/WarrantyLookupPage';
 import {
   WirelessScannerProvider,
 } from '@/context/WirelessScannerContext';
@@ -111,6 +113,9 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+
+      <Route path="/stock-units" element={<ProtectedRoute><StockUnitsPage /></ProtectedRoute>} />
+      <Route path="/warranty-lookup" element={<ProtectedRoute><WarrantyLookupPage /></ProtectedRoute>} />
 
       <Route
         path="/sales"

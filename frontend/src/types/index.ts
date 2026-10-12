@@ -46,6 +46,18 @@ export interface SaleItem {
   price: number;
   quantity: number;
   subtotal: number;
+  shopWarrantyEligible?: boolean | null;
+  shopWarrantyMonths?: number | null;
+  shopWarrantyStartDate?: string | null;
+  shopWarrantyEndDate?: string | null;
+  productSku?: string | null;
+  variantSku?: string | null;
+  stockUnits?: Array<{
+    stock_unit_id: number | string;
+    internal_sku_snapshot: string;
+    manufacturer_serial_number_snapshot: string;
+    current_state: string;
+  }>;
 }
 
 export interface Sale {

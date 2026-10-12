@@ -57,7 +57,14 @@ import {
   taxOnNet,
 } from '@/lib/currency';
 
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
+import {
+  assertCheckoutSelections,
+  checkoutAttemptSignature,
+  selectedUnitIds,
+  warrantySnapshotLabel,
+  type StockUnitSummary,
+} from '@/lib/serializedInventory';
 import {
   WARRANTY_OPTIONS,
   suggestWarrantyMonths,
@@ -106,6 +113,9 @@ interface ApiProduct {
 
   variant_count?: number | string;
   has_variants?: boolean;
+  effective_serial_tracking_enabled?: boolean;
+  effective_shop_warranty_enabled?: boolean;
+  effective_shop_warranty_months?: number | null;
 }
 
 interface ApiVariant {
@@ -137,6 +147,9 @@ interface ApiVariant {
     | string;
 
   is_active?: boolean;
+  effective_serial_tracking_enabled?: boolean;
+  effective_shop_warranty_enabled?: boolean;
+  effective_shop_warranty_months?: number | null;
 }
 
 interface ApiSearchResult {
@@ -160,6 +173,9 @@ interface ApiSearchResult {
 
   image_url?: string | null;
   image_path?: string | null;
+  effective_serial_tracking_enabled?: boolean;
+  effective_shop_warranty_enabled?: boolean;
+  effective_shop_warranty_months?: number | null;
 }
 
 /* =========================================================
@@ -175,6 +191,9 @@ interface POSProduct extends Product {
   parentProductId?: string;
   variantId?: string;
   variantName?: string;
+  serialTrackingEnabled?: boolean;
+  shopWarrantyEnabled?: boolean;
+  shopWarrantyMonths?: number | null;
 }
 
 /* =========================================================
@@ -269,11 +288,16 @@ function mapProduct(
       Number(
         product.variant_count ?? 0
       ),
+    serialTrackingEnabled: product.effective_serial_tracking_enabled === true,
+    shopWarrantyEnabled: product.effective_shop_warranty_enabled === true,
+    shopWarrantyMonths: product.effective_shop_warranty_months == null
+      ? null : Number(product.effective_shop_warranty_months),
   };
 }
 
 interface POSDraft {
   cart: CartLine[];
+  selectedStockUnits?: Record<string, StockUnitSummary[]>;
   discount: number;
   discountPercent: number;
   selectedCustomer: Customer | null;
@@ -535,10 +559,23 @@ const [warrantyOverridden, setWarrantyOverridden] = useState(
       ?.checkoutOpen ?? false
 );
 
-  const [
+const [
   paymentVerified,
   setPaymentVerified,
 ] = useState(false);
+
+const [selectedStockUnits, setSelectedStockUnits] = useState<Record<string, StockUnitSummary[]>>(
+  () => savedDraftRef.current?.selectedStockUnits ?? {}
+);
+const [availableStockUnits, setAvailableStockUnits] = useState<Record<string, StockUnitSummary[]>>({});
+const [unitLookupValues, setUnitLookupValues] = useState<Record<string, string>>({});
+const [unitSelectionTarget, setUnitSelectionTarget] = useState<string | null>(null);
+const [loadingStockUnits, setLoadingStockUnits] = useState(false);
+const [checkoutConflict, setCheckoutConflict] = useState('');
+const [submittingSale, setSubmittingSale] = useState(false);
+const [pendingScannedUnit, setPendingScannedUnit] = useState<{
+  cartKey: string; unit: StockUnitSummary;
+} | null>(null);
 
   const [
     receiptOpen,
@@ -595,6 +632,7 @@ const scannerProcessingRef =
  */
 const checkoutKeyRef =
   useRef<string | null>(null);
+const checkoutSubmittingRef = useRef(false);
 
 
 
@@ -656,6 +694,7 @@ const [
 
       const draft: POSDraft = {
   cart,
+  selectedStockUnits,
   discount,
   discountPercent,
   selectedCustomer,
@@ -682,6 +721,7 @@ const [
     }
   }, [
   cart,
+  selectedStockUnits,
   discount,
   discountPercent,
   selectedCustomer,
@@ -875,6 +915,158 @@ const [
 
   const total = netAfterDiscount + taxAmount;
 
+  const hasSerializedItems = cart.some(
+    (line) => (line.product as POSProduct).serialTrackingEnabled === true
+  );
+  const usesCheckoutV2 = cart.some((line) => {
+    const product = line.product as POSProduct;
+    return product.serialTrackingEnabled === true || product.shopWarrantyEnabled === true;
+  });
+  const serializedSelectionsComplete = cart.every((line) => {
+    const product = line.product as POSProduct;
+    return !product.serialTrackingEnabled
+      || (selectedStockUnits[product.id] || []).length === line.quantity;
+  });
+
+  const checkoutAttempt = useMemo(() => checkoutAttemptSignature({
+    checkoutContractVersion: usesCheckoutV2 ? 2 : 1,
+    items: cart.map((line) => {
+      const product = line.product as POSProduct;
+      return {
+        product_id: product.parentProductId ?? product.id,
+        variant_id: product.variantId ?? null,
+        quantity: line.quantity,
+        stock_unit_ids: selectedUnitIds(selectedStockUnits, product.id),
+      };
+    }),
+    paymentMethod, discount,
+    warrantyMonths: !usesCheckoutV2 && warrantyOverridden
+      ? warrantyMonths
+      : 'automatic',
+    customerId: selectedCustomer?.id ?? null,
+    customer: invoiceCustomer,
+  }), [
+    cart,
+    selectedStockUnits,
+    usesCheckoutV2,
+    paymentMethod,
+    discount,
+    warrantyOverridden,
+    warrantyMonths,
+    selectedCustomer?.id,
+    invoiceCustomer,
+  ]);
+
+  const previousCheckoutAttemptRef = useRef(checkoutAttempt);
+  const latestCheckoutAttemptRef = useRef(checkoutAttempt);
+  latestCheckoutAttemptRef.current = checkoutAttempt;
+  useEffect(() => {
+    if (previousCheckoutAttemptRef.current !== checkoutAttempt) {
+      checkoutKeyRef.current = null;
+      setCheckoutConflict('');
+      previousCheckoutAttemptRef.current = checkoutAttempt;
+    }
+  }, [checkoutAttempt]);
+
+  useEffect(() => {
+    setSelectedStockUnits((current) => {
+      const next: Record<string, StockUnitSummary[]> = {};
+      for (const line of cart) {
+        const key = line.product.id;
+        if ((line.product as POSProduct).serialTrackingEnabled) {
+          next[key] = (current[key] || []).slice(0, line.quantity);
+        }
+      }
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [cart]);
+
+  const loadAvailableUnits = useCallback(async () => {
+    const tracked = cart.filter((line) => (line.product as POSProduct).serialTrackingEnabled);
+    if (tracked.length === 0) { setAvailableStockUnits({}); return; }
+    setLoadingStockUnits(true);
+    try {
+      const entries = await Promise.all(tracked.map(async (line) => {
+        const product = line.product as POSProduct;
+        const params = new URLSearchParams({ state: 'available', product_id: product.parentProductId ?? product.id, limit: '100' });
+        if (product.variantId) params.set('variant_id', product.variantId);
+        const result = await api.get<{ items: StockUnitSummary[] }>(`/api/stock-units?${params}`);
+        return [product.id, result.items] as const;
+      }));
+      const available = Object.fromEntries(entries);
+      setAvailableStockUnits(available);
+    } catch (error) { toast(error instanceof Error ? error.message : 'Failed to load available stock units.', 'error'); }
+    finally { setLoadingStockUnits(false); }
+  }, [cart, toast]);
+
+  async function refreshCartPoliciesBeforeCheckout(): Promise<boolean> {
+    const catalog = await api.get<ApiProduct[]>('/api/products');
+    const parentIds = [...new Set(cart
+      .map((line) => (line.product as POSProduct).parentProductId)
+      .filter((id): id is string => Boolean(id)))];
+    const variantsByParent = new Map<string, ApiVariant[]>();
+
+    await Promise.all(parentIds.map(async (parentId) => {
+      variantsByParent.set(
+        parentId,
+        await api.get<ApiVariant[]>(`/api/products/${parentId}/variants`)
+      );
+    }));
+
+    const productsById = new Map(catalog.map((product) => [String(product.id), product]));
+    const policies = new Map<string, {
+      serialTrackingEnabled: boolean;
+      shopWarrantyEnabled: boolean;
+      shopWarrantyMonths: number | null;
+    }>();
+
+    for (const line of cart) {
+      const product = line.product as POSProduct;
+      const parentId = product.parentProductId ?? product.id;
+      const source = product.variantId
+        ? variantsByParent.get(parentId)?.find((variant) => String(variant.id) === product.variantId)
+        : productsById.get(parentId);
+
+      if (!source) {
+        throw new Error(`${product.name} is no longer available. Refresh the cart before checkout.`);
+      }
+
+      policies.set(product.id, {
+        serialTrackingEnabled: source.effective_serial_tracking_enabled === true,
+        shopWarrantyEnabled: source.effective_shop_warranty_enabled === true,
+        shopWarrantyMonths: source.effective_shop_warranty_months == null
+          ? null
+          : Number(source.effective_shop_warranty_months),
+      });
+    }
+
+    const policyChanged = cart.some((line) => {
+      const product = line.product as POSProduct;
+      const current = policies.get(product.id)!;
+      return product.serialTrackingEnabled !== current.serialTrackingEnabled
+        || product.shopWarrantyEnabled !== current.shopWarrantyEnabled
+        || product.shopWarrantyMonths !== current.shopWarrantyMonths;
+    });
+
+    if (!policyChanged) return true;
+
+    setCart((current) => current.map((line) => ({
+      ...line,
+      product: {
+        ...line.product,
+        ...policies.get(line.product.id),
+      },
+    })));
+    setSelectedStockUnits({});
+    setUnitSelectionTarget(null);
+    checkoutKeyRef.current = null;
+    setCheckoutConflict(
+      'Inventory or warranty policy changed. Review the cart and select every physical unit again.'
+    );
+    toast('Product policy changed; checkout was refreshed for review.', 'warning');
+    return false;
+  }
+
   useEffect(() => {
     if (checkoutOpen && !warrantyOverridden) {
       setWarrantyMonths(suggestWarrantyMonths(total));
@@ -885,6 +1077,38 @@ const [
     setWarrantyMonths(suggestWarrantyMonths(total));
     setWarrantyOverridden(false);
     setCheckoutOpen(true);
+    setCheckoutConflict('');
+    void loadAvailableUnits();
+  }
+
+  function toggleUnit(cartKey: string, unit: StockUnitSummary, quantity: number) {
+    setSelectedStockUnits((current) => {
+      const selected = current[cartKey] || [];
+      const exists = selected.some((entry) => String(entry.id) === String(unit.id));
+      if (exists) return { ...current, [cartKey]: selected.filter((entry) => String(entry.id) !== String(unit.id)) };
+      if (Object.values(current).flat().some((entry) => String(entry.id) === String(unit.id))) {
+        toast('That physical unit is already selected elsewhere in this cart.', 'warning'); return current;
+      }
+      if (selected.length >= quantity) { toast(`Only ${quantity} unit${quantity === 1 ? '' : 's'} can be selected for this line.`, 'warning'); return current; }
+      return { ...current, [cartKey]: [...selected, unit] };
+    });
+  }
+
+  async function selectUnitByCode(cartKey: string, code: string) {
+    const line = cart.find((entry) => entry.product.id === cartKey);
+    if (!line || !code.trim()) return false;
+    try {
+      const unit = await api.get<StockUnitSummary>(`/api/stock-units/lookup?code=${encodeURIComponent(code.trim())}`);
+      const product = line.product as POSProduct;
+      const matches = String(unit.product_id) === String(product.parentProductId ?? product.id)
+        && String(unit.variant_id ?? '') === String(product.variantId ?? '');
+      if (!matches || unit.state !== 'available') {
+        toast('This code is not an available physical unit for the selected cart item.', 'warning'); return false;
+      }
+      setPendingScannedUnit({ cartKey, unit });
+      setUnitLookupValues((current) => ({ ...current, [cartKey]: '' }));
+      return true;
+    } catch (error) { toast(error instanceof Error ? error.message : 'Stock unit not found.', 'error'); return false; }
   }
 
   const totalItems =
@@ -1062,6 +1286,10 @@ const [
   setDiscountPercent(0);
   setWarrantyMonths(0);
   setWarrantyOverridden(false);
+  setSelectedStockUnits({});
+  setAvailableStockUnits({});
+  setCheckoutConflict('');
+  setUnitSelectionTarget(null);
   setDesktopCartOpen(false);
 
   localStorage.removeItem(
@@ -1216,6 +1444,11 @@ const [
 
         variantName:
           variant.name,
+
+        serialTrackingEnabled: variant.effective_serial_tracking_enabled === true,
+        shopWarrantyEnabled: variant.effective_shop_warranty_enabled === true,
+        shopWarrantyMonths: variant.effective_shop_warranty_months == null
+          ? null : Number(variant.effective_shop_warranty_months),
       };
 
     addToCart(
@@ -1235,8 +1468,12 @@ const lookupBarcode = useCallback(
   async (rawCode: string) => {
     const code = rawCode.trim();
 
-    if (!code) {
+    if (!code || checkoutSubmittingRef.current) {
       return false;
+    }
+
+    if (unitSelectionTarget) {
+      return selectUnitByCode(unitSelectionTarget, code);
     }
 
     try {
@@ -1344,6 +1581,11 @@ const scannedProductProduct: POSProduct = {
 
   variantName:
     variant.name,
+
+  serialTrackingEnabled: result.effective_serial_tracking_enabled === true,
+  shopWarrantyEnabled: result.effective_shop_warranty_enabled === true,
+  shopWarrantyMonths: result.effective_shop_warranty_months == null
+    ? null : Number(result.effective_shop_warranty_months),
 };
 
 setScannedProduct({
@@ -1404,13 +1646,18 @@ return true;
       return false;
     }
   },
-  [products]
+  // The scanner handler must refresh with the current cart and physical-unit selection state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [products, unitSelectionTarget, cart, selectedStockUnits]
 );
 
+const lastHandledWirelessScanRef = useRef(0);
 useEffect(() => {
-  if (!lastScan) {
+  if (!lastScan || lastHandledWirelessScanRef.current === lastScan.id) {
     return;
   }
+
+  lastHandledWirelessScanRef.current = lastScan.id;
 
   lookupBarcode(
     lastScan.code
@@ -1660,23 +1907,42 @@ useEffect(() => {
    ========================================================= */
 
 async function completeSale() {
-  if (cart.length === 0) {
+  if (cart.length === 0 || checkoutSubmittingRef.current) {
     return;
   }
 
-  /*
-   * Create the key only once for this checkout.
-   * A retry keeps the same key.
-   */
-  if (!checkoutKeyRef.current) {
-    checkoutKeyRef.current =
-      crypto.randomUUID();
-  }
+  const startedCheckoutAttempt = checkoutAttempt;
 
-  const idempotencyKey =
-    checkoutKeyRef.current;
+  checkoutSubmittingRef.current = true;
+  setSubmittingSale(true);
+  setCheckoutConflict('');
 
   try {
+    if (!await refreshCartPoliciesBeforeCheckout()) return;
+
+    if (latestCheckoutAttemptRef.current !== startedCheckoutAttempt) {
+      checkoutKeyRef.current = null;
+      setCheckoutConflict(
+        'Checkout details changed during validation. Review the updated cart before retrying.'
+      );
+      return;
+    }
+
+    assertCheckoutSelections(cart.map((line) => ({
+      cartKey: line.product.id,
+      quantity: line.quantity,
+      tracked: (line.product as POSProduct).serialTrackingEnabled === true,
+    })), selectedStockUnits);
+
+    /*
+     * Create the key only after the authoritative policy preflight succeeds.
+     * An identical retry keeps the same key.
+     */
+    if (!checkoutKeyRef.current) {
+      checkoutKeyRef.current = crypto.randomUUID();
+    }
+
+    const idempotencyKey = checkoutKeyRef.current;
     let customerId =
       selectedCustomer
         ? Number(selectedCustomer.id)
@@ -1723,6 +1989,7 @@ async function completeSale() {
     }
 
     const payload = {
+      ...(usesCheckoutV2 ? { checkout_contract_version: 2 } : {}),
       items: cart.map((line) => {
         const product =
           line.product as POSProduct;
@@ -1738,6 +2005,10 @@ async function completeSale() {
 
           quantity:
             line.quantity,
+
+          ...(usesCheckoutV2 ? {
+            stock_unit_ids: selectedUnitIds(selectedStockUnits, product.id),
+          } : {}),
         };
       }),
 
@@ -1764,7 +2035,7 @@ async function completeSale() {
 idempotency_key:
   idempotencyKey,
 
-      ...(warrantyOverridden
+      ...(!usesCheckoutV2 && warrantyOverridden
         ? { warranty_months: warrantyMonths }
         : {}),
 };
@@ -1799,6 +2070,31 @@ idempotency_key:
 
           variant_sku:
             string | null;
+
+          product_sku_snapshot?:
+            string | null;
+
+          variant_sku_snapshot?:
+            string | null;
+
+          shop_warranty_eligible?:
+            boolean | null;
+
+          shop_warranty_months?:
+            number | string | null;
+
+          shop_warranty_start_date?:
+            string | null;
+
+          shop_warranty_end_date?:
+            string | null;
+
+          stock_units?: Array<{
+            stock_unit_id: number | string;
+            internal_sku_snapshot: string;
+            manufacturer_serial_number_snapshot: string;
+            current_state: string;
+          }>;
 
           quantity: number;
 
@@ -1848,6 +2144,8 @@ idempotency_key:
                 : item.product_name,
 
             sku:
+              item.variant_sku_snapshot ??
+              item.product_sku_snapshot ??
               item.variant_sku ??
               '',
 
@@ -1865,6 +2163,29 @@ idempotency_key:
               Number(
                 item.line_total
               ),
+
+            shopWarrantyEligible:
+              item.shop_warranty_eligible,
+
+            shopWarrantyMonths:
+              item.shop_warranty_months == null
+                ? item.shop_warranty_months
+                : Number(item.shop_warranty_months),
+
+            shopWarrantyStartDate:
+              item.shop_warranty_start_date,
+
+            shopWarrantyEndDate:
+              item.shop_warranty_end_date,
+
+            productSku:
+              item.product_sku_snapshot,
+
+            variantSku:
+              item.variant_sku_snapshot,
+
+            stockUnits:
+              item.stock_units ?? [],
           })
         ),
 
@@ -1943,12 +2264,22 @@ checkoutKeyRef.current = null;
       'success'
     );
   } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      setSelectedStockUnits({});
+      setUnitSelectionTarget(null);
+      checkoutKeyRef.current = null;
+      setCheckoutConflict('Inventory changed while this sale was being prepared. Availability was refreshed; select and confirm every physical unit again before retrying.');
+      await loadAvailableUnits();
+    }
     toast(
       error instanceof Error
         ? error.message
         : 'Checkout failed.',
       'error'
     );
+  } finally {
+    checkoutSubmittingRef.current = false;
+    setSubmittingSale(false);
   }
 }
   
@@ -2308,6 +2639,11 @@ const scannedProductAvailable =
               result.type === 'variant'
                 ? result.variant_name ?? undefined
                 : undefined,
+
+            serialTrackingEnabled: result.effective_serial_tracking_enabled === true,
+            shopWarrantyEnabled: result.effective_shop_warranty_enabled === true,
+            shopWarrantyMonths: result.effective_shop_warranty_months == null
+              ? null : Number(result.effective_shop_warranty_months),
           };
 
           return (
@@ -3099,6 +3435,25 @@ const scannedProductAvailable =
   )}
 </Modal>
 
+<Modal
+  open={Boolean(pendingScannedUnit)}
+  onClose={() => setPendingScannedUnit(null)}
+  title="Confirm Physical Unit"
+  description="Verify the manufacturer serial and internal SU- code before adding this exact unit."
+  size="sm"
+>
+  {pendingScannedUnit && <div className="space-y-4">
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <p className="text-xs font-semibold uppercase text-slate-400">Manufacturer serial</p>
+      <p className="mt-1 break-all font-mono font-bold text-slate-900">{pendingScannedUnit.unit.manufacturer_serial_number}</p>
+      <p className="mt-3 text-xs font-semibold uppercase text-slate-400">Internal stock-unit code</p>
+      <p className="mt-1 font-mono font-bold text-slate-900">{pendingScannedUnit.unit.internal_sku}</p>
+      <p className="mt-3 text-sm text-slate-600">{pendingScannedUnit.unit.product_name}{pendingScannedUnit.unit.variant_name ? ` · ${pendingScannedUnit.unit.variant_name}` : ''}</p>
+    </div>
+    <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingScannedUnit(null)}>Cancel</Button><Button onClick={() => { const line = cart.find((entry) => entry.product.id === pendingScannedUnit.cartKey); if (line) toggleUnit(pendingScannedUnit.cartKey, pendingScannedUnit.unit, line.quantity); setPendingScannedUnit(null); }}>Confirm exact unit</Button></div>
+  </div>}
+</Modal>
+
       {/* =====================================================
           VARIANT PICKER
           ===================================================== */}
@@ -3226,8 +3581,10 @@ const scannedProductAvailable =
   open={checkoutOpen}
   compactMobile
   onClose={() => {
+    if (submittingSale) return;
     setCheckoutOpen(false);
     setPaymentVerified(false);
+    setUnitSelectionTarget(null);
   }}
   title="Complete Sale"
   description={`${totalItems} ${
@@ -3237,9 +3594,11 @@ const scannedProductAvailable =
     <>
       <Button
         variant="outline"
+        disabled={submittingSale}
         onClick={() => {
           setCheckoutOpen(false);
           setPaymentVerified(false);
+          setUnitSelectionTarget(null);
         }}
       >
         Cancel
@@ -3249,9 +3608,11 @@ const scannedProductAvailable =
   variant="success"
   onClick={completeSale}
   disabled={
-    paymentMethod !== 'cash' &&
-    !paymentVerified
+    submittingSale || Boolean(checkoutConflict) || !serializedSelectionsComplete || (
+      paymentMethod !== 'cash' && !paymentVerified
+    )
   }
+  loading={submittingSale}
   leftIcon={
     <CheckCircle2 className="h-4 w-4" />
   }
@@ -3261,7 +3622,38 @@ const scannedProductAvailable =
     </>
   }
 >
-  <div className="space-y-3 sm:space-y-5">
+  <div className={`space-y-3 sm:space-y-5 ${submittingSale ? 'pointer-events-none opacity-70' : ''}`}>
+
+   {checkoutConflict && (
+    <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+      <p className="font-semibold">{checkoutConflict}</p>
+      <Button
+        className="mt-3"
+        size="sm"
+        variant="outline"
+        onClick={() => setCheckoutConflict('')}
+      >
+        I reviewed the cart
+      </Button>
+    </div>
+   )}
+
+   {hasSerializedItems && (
+    <section className="space-y-3 rounded-xl border-2 border-brand-200 bg-brand-50/40 p-4">
+      <div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-900">Physical unit selection</p><p className="text-xs text-slate-600">Scan a manufacturer SN or SU- code, or choose an available unit. Product barcodes do not identify a physical unit.</p></div><Button size="sm" variant="outline" loading={loadingStockUnits} onClick={loadAvailableUnits}>Refresh</Button></div>
+      {cart.filter((line) => (line.product as POSProduct).serialTrackingEnabled).map((line) => {
+        const product = line.product as POSProduct;
+        const selected = selectedStockUnits[product.id] || [];
+        const available = availableStockUnits[product.id] || [];
+        return <div key={product.id} className="rounded-xl border border-slate-200 bg-white p-3">
+          <div className="flex justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">{product.name}</p><p className="font-mono text-xs text-slate-500">{product.sku}</p></div><p className={`text-sm font-bold ${selected.length === line.quantity ? 'text-emerald-700' : 'text-amber-700'}`}>{selected.length} / {line.quantity} selected</p></div>
+          <div className="mt-3 flex gap-2"><input className="h-10 min-w-0 flex-1 rounded-lg border border-slate-200 px-3 font-mono text-sm" value={unitLookupValues[product.id] || ''} onFocus={() => setUnitSelectionTarget(product.id)} onChange={(e) => setUnitLookupValues((current) => ({ ...current, [product.id]: e.target.value }))} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void selectUnitByCode(product.id, unitLookupValues[product.id] || ''); } }} placeholder="Scan or enter manufacturer SN / SU- code" /><Button variant="outline" onClick={() => selectUnitByCode(product.id, unitLookupValues[product.id] || '')}>Add</Button><Button variant={unitSelectionTarget === product.id ? 'secondary' : 'outline'} onClick={() => { setUnitSelectionTarget(product.id); setScannerOpen(true); }}>Camera</Button></div>
+          <div className="mt-3 max-h-36 space-y-1 overflow-y-auto">{available.map((unit) => { const checked = selected.some((entry) => String(entry.id) === String(unit.id)); return <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-xs ${checked ? 'border-brand-500 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number}</span><span className="shrink-0 font-mono font-bold">{unit.internal_sku}</span></button>; })}{!loadingStockUnits && available.length === 0 && <p className="py-2 text-center text-xs text-slate-500">No available units. Refresh or review Stock Units.</p>}</div>
+          {selected.length > 0 && <div className="mt-2 space-y-1"><p className="text-xs font-semibold text-slate-700">Confirmed physical units</p>{selected.map((unit) => <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className="flex w-full items-center justify-between gap-2 rounded-md bg-slate-100 px-2 py-1 text-left text-xs"><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number} ({unit.internal_sku})</span><span className="shrink-0 font-semibold text-red-600">Remove</span></button>)}</div>}
+        </div>;
+      })}
+    </section>
+   )}
 
    {/* =====================================================
     CUSTOMER
@@ -3540,7 +3932,7 @@ const scannedProductAvailable =
       WARRANTY
       ===================================================== */}
 
-  <div>
+  {!usesCheckoutV2 ? <div>
     <div className="mb-2 flex items-center justify-between gap-3">
       <p className="text-sm font-semibold text-slate-700">
         Invoice Warranty
@@ -3574,7 +3966,11 @@ const scannedProductAvailable =
     <p className="mt-2 text-xs text-slate-500">
       Selected: {warrantyLabel(warrantyMonths)}. This choice will be saved with the invoice.
     </p>
-  </div>
+  </div> : <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <p className="text-sm font-semibold text-slate-700">Saved item warranties</p>
+    <p className="mt-1 text-xs text-slate-500">Checkout V2 saves each item’s current product or variant shop-warranty policy. Invoice-total suggestions do not apply.</p>
+    <div className="mt-2 space-y-1">{cart.map((line) => { const product = line.product as POSProduct; return <p key={product.id} className="flex justify-between gap-3 text-xs"><span className="truncate">{product.name}</span><strong>{product.shopWarrantyEnabled ? `${product.shopWarrantyMonths} month${product.shopWarrantyMonths === 1 ? '' : 's'}` : 'No warranty'}</strong></p>; })}</div>
+  </div>}
 
    {/* =====================================================
     PAYMENT METHOD
@@ -4186,6 +4582,30 @@ const scannedProductAvailable =
       </div>
 
       <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+
+        <div className="mb-4 space-y-3 border-b border-slate-200 pb-4">
+          {lastSale.items.map((item, itemIndex) => (
+            <div key={`${item.productId}-${item.sku}-${itemIndex}`} className="text-left">
+              <div className="flex items-start justify-between gap-3 text-sm">
+                <span className="font-semibold text-slate-900">{item.name}</span>
+                <span className="shrink-0 text-slate-600">x{item.quantity}</span>
+              </div>
+              {(item.shopWarrantyEligible != null || (item.stockUnits?.length ?? 0) > 0) && (
+                <p className="mt-1 text-xs font-medium text-slate-600">
+                  Shop warranty: {warrantySnapshotLabel(item)}
+                </p>
+              )}
+              {(item.stockUnits ?? []).map((unit) => (
+                <p
+                  key={String(unit.stock_unit_id)}
+                  className="mt-1 break-all text-xs leading-5 text-slate-600"
+                >
+                  SN: {unit.manufacturer_serial_number_snapshot} / SU: {unit.internal_sku_snapshot}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
 
         <div className="flex items-center justify-between text-sm">
           <span className="text-slate-500">

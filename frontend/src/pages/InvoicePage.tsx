@@ -21,6 +21,7 @@ import {
   warrantyLabel,
   type WarrantyMonths,
 } from '@/lib/warranty';
+import { warrantySnapshotLabel } from '@/lib/serializedInventory';
 
 /* =========================================================
    TYPES
@@ -47,6 +48,17 @@ interface InvoiceItem {
   unitPrice: number;
 
   lineTotal: number;
+
+  shopWarrantyEligible: boolean | null;
+  shopWarrantyMonths: number | null;
+  shopWarrantyStartDate: string | null;
+  shopWarrantyEndDate: string | null;
+  productSku: string | null;
+  variantSku: string | null;
+  stockUnits: Array<{
+    id: string; internalSku: string; serialNumber: string; state: string;
+    releasedAt: string | null; releaseReason: string | null;
+  }>;
 }
 
 interface InvoiceCustomer {
@@ -99,6 +111,8 @@ interface InvoiceData {
   total: number;
 
   warrantyMonths: number | null;
+
+  checkoutContractVersion: number | null;
 
   refundedAt:
   string | null;
@@ -443,7 +457,7 @@ export function InvoicePage() {
   </button>
 </div>
 
-{user?.role === 'admin' && (
+{user?.role === 'admin' && invoice.checkoutContractVersion !== 2 && (
   <div className="mx-auto mb-4 max-w-[210mm] rounded-xl border border-slate-200 bg-white p-4 print:hidden">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
       <label className="flex-1">
@@ -915,10 +929,26 @@ export function InvoicePage() {
                         </p>
                       )}
 
+                      <div className="mt-2 space-y-1 text-[10px] leading-4 text-black">
+                        <p>
+                          <span className="font-bold">Shop warranty:</span>{' '}
+                          {warrantySnapshotLabel(item)}
+                        </p>
+                        {item.shopWarrantyStartDate && (
+                          <p><span className="font-bold">Coverage:</span>{' '}{item.shopWarrantyStartDate} to {item.shopWarrantyEndDate}</p>
+                        )}
+                        {(item.stockUnits || []).map((unit) => (
+                          <p key={unit.id} className="break-all font-mono">
+                            <span className="font-sans font-bold">SN:</span>{' '}{unit.serialNumber}{' · '}
+                            <span className="font-sans font-bold">Unit:</span>{' '}{unit.internalSku}
+                          </p>
+                        ))}
+                      </div>
+
                     </td>
 
                     <td className="break-all py-3 pr-3 font-mono text-[11px] font-semibold text-slate-800">
-                      {item.sku || '—'}
+                      {item.variantSku || item.productSku || item.sku || '—'}
                     </td>
 
                     <td className="py-3 text-center font-bold text-black">
@@ -1033,7 +1063,7 @@ export function InvoicePage() {
 
         {/* Uses only the warranty value stored on this invoice. */}
 
-        <section
+        {invoice.checkoutContractVersion !== 2 && <section
           data-testid="invoice-warranty-panel"
           className="
             mt-4
@@ -1082,7 +1112,7 @@ export function InvoicePage() {
               and conditions.
             </p>
           </div>
-        </section>
+        </section>}
 
         {/* ===================================================
     REFUND INFORMATION
@@ -1327,6 +1357,12 @@ export function InvoicePage() {
             .invoice-page tr {
               page-break-inside: avoid;
               break-inside: avoid;
+            }
+
+            .invoice-page td,
+            .invoice-page p {
+              overflow-wrap: anywhere;
+              word-break: break-word;
             }
 
             .invoice-page img {

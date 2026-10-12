@@ -9,6 +9,8 @@ import {
   Users,
   BarChart3,
   Settings,
+  ScanSearch,
+  ShieldCheck,
   ChevronLeft,
   LogOut,
 } from 'lucide-react';
@@ -43,6 +45,16 @@ const navItems = [
     to: '/inventory',
     label: 'Inventory',
     icon: Boxes,
+  },
+  {
+    to: '/stock-units',
+    label: 'Stock Units',
+    icon: ScanSearch,
+  },
+  {
+    to: '/warranty-lookup',
+    label: 'Warranty Lookup',
+    icon: ShieldCheck,
   },
   {
     to: '/sales',

@@ -24,6 +24,23 @@ function getToken(): string | null {
   return localStorage.getItem(TOKEN_STORAGE_KEY);
 }
 
+export class ApiError extends Error {
+  status: number;
+  code: string | null;
+
+  constructor(message: string, status: number, code: string | null = null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function getErrorCode(data: unknown): string | null {
+  return typeof data === 'object' && data !== null && 'code' in data && typeof data.code === 'string'
+    ? data.code : null;
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -96,22 +113,28 @@ export async function apiRequest<T>(
         new Event(AUTH_EXPIRED_EVENT)
       );
 
-      throw new Error(
+      throw new ApiError(
         errorMessage ||
-          'Your session has expired. Please sign in again.'
+          'Your session has expired. Please sign in again.',
+        response.status,
+        getErrorCode(data)
       );
     }
 
     if (response.status === 403) {
-      throw new Error(
+      throw new ApiError(
         errorMessage ||
-          'You do not have permission to perform this action.'
+          'You do not have permission to perform this action.',
+        response.status,
+        getErrorCode(data)
       );
     }
 
-    throw new Error(
+    throw new ApiError(
       errorMessage ||
-        `Request failed (${response.status})`
+        `Request failed (${response.status})`,
+      response.status,
+      getErrorCode(data)
     );
   }
 

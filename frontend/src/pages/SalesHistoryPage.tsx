@@ -37,6 +37,7 @@ import {
   formatDateTime,
   formatDate,
 } from '@/lib/format';
+import { warrantySnapshotLabel } from '@/lib/serializedInventory';
 
 /* =========================================================
    API TYPES
@@ -72,6 +73,19 @@ interface ApiSaleItem {
 
   line_total:
     number | string;
+
+  shop_warranty_eligible: boolean | null;
+  shop_warranty_months: number | string | null;
+  shop_warranty_start_date: string | null;
+  shop_warranty_end_date: string | null;
+  product_sku_snapshot: string | null;
+  variant_sku_snapshot: string | null;
+  stock_units: Array<{
+    stock_unit_id: number | string;
+    internal_sku_snapshot: string;
+    manufacturer_serial_number_snapshot: string;
+    current_state: string;
+  }>;
 }
 
 interface ApiSale {
@@ -272,7 +286,14 @@ const [
                   subtotal:
                     Number(
                       item.line_total
-                    ),
+                      ),
+                  shopWarrantyEligible: item.shop_warranty_eligible,
+                  shopWarrantyMonths: item.shop_warranty_months == null ? null : Number(item.shop_warranty_months),
+                  shopWarrantyStartDate: item.shop_warranty_start_date,
+                  shopWarrantyEndDate: item.shop_warranty_end_date,
+                  productSku: item.product_sku_snapshot,
+                  variantSku: item.variant_sku_snapshot,
+                  stockUnits: item.stock_units || [],
                 })
               ),
 
@@ -1258,6 +1279,16 @@ refundedBy:
                               '—'
                             }
                           </p>
+
+                          <p className="mt-1 text-xs text-slate-600">
+                            {warrantySnapshotLabel(item)}
+                          </p>
+
+                          {item.stockUnits?.map((unit) => (
+                            <p key={String(unit.stock_unit_id)} className="mt-1 break-all font-mono text-[11px] text-slate-600">
+                              SN: {unit.manufacturer_serial_number_snapshot} · {unit.internal_sku_snapshot}
+                            </p>
+                          ))}
 
                         </td>
 
