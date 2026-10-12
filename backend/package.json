@@ -14,6 +14,8 @@
     "migrate:status": "node scripts/migrate.mjs status",
     "test:migrations": "node --test scripts/migrate.test.mjs",
     "test:migrations:p2b-integration": "node --test scripts/p2b-migration.integration.test.mjs",
+    "test:stock-unit-domain": "node --test src/services/stock-unit-policy.test.js src/services/serial-number.test.js src/services/shop-warranty-period.test.js src/services/stock-unit-service.test.js",
+    "test:stock-unit-integration": "node --test scripts/stock-unit-service.integration.test.mjs",
     "test:refund-void": "node --test src/services/sale-reversal.test.js",
     "test:product-recycle-bin": "node --test src/services/product-recycle-bin.test.js",
     "test:checkout-idempotency": "node --test src/services/checkout-fingerprint.test.js",
