@@ -63,6 +63,8 @@ Restore verification uses an exact comparison against the manifest saved with th
 
 Legacy format-1 backups remain restorable using their original comparison rules. Because an old manifest cannot retroactively contain a value it never captured, always create and verify a fresh format-2 backup before a production upgrade.
 
+Phase 2B extends this contract with product/variant policy columns, sale-item snapshots, `stock_units`, `stock_unit_events`, `sale_item_stock_units`, and their four new sequences. When that migration is first rehearsed or applied, verification requires all three new tables to be empty and every new sequence to remain at its uncalled initial value. Once the feature begins storing data, every row, snapshot, event, assignment, and sequence value is included in subsequent backup manifests.
+
 The backup does not export Safari/Chrome private local storage. Keep the existing browser profile and `https://localhost:5173` origin unchanged, and retain a Time Machine backup. The authentication fix removes only the stored user and token; it does not clear the cart-draft key.
 
 ## Run the update

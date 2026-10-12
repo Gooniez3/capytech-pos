@@ -11,7 +11,10 @@ import {
   resolveProductImagesDir,
   sha256File,
 } from './lib/backup-safety.mjs';
-import { captureProductionDataManifest } from './lib/production-data.mjs';
+import {
+  assertPhase2BMigrationInitialState,
+  captureProductionDataManifest,
+} from './lib/production-data.mjs';
 
 const releaseRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isWindows = process.platform === 'win32';
@@ -110,7 +113,7 @@ async function captureLiveManifest(env, packageRoot, comparisonManifest = null) 
   }
 }
 
-async function verifyLiveWarrantyColumn(env, packageRoot) {
+async function verifyLiveAdditiveSchema(env, packageRoot, expectEmptyPhase2B) {
   const requireFromBackend = createRequire(path.join(packageRoot, 'backend', 'package.json'));
   const { Client } = requireFromBackend('pg');
   const client = new Client({
@@ -137,6 +140,10 @@ async function verifyLiveWarrantyColumn(env, packageRoot) {
     ) {
       throw new Error('Live warranty column is not nullable and default-free.');
     }
+    if (expectEmptyPhase2B) {
+      await assertPhase2BMigrationInitialState(client);
+    }
+    await captureProductionDataManifest(client);
   } finally {
     await client.end();
   }
@@ -268,7 +275,11 @@ async function main() {
   });
   const afterManifest = await captureLiveManifest(env, releaseRoot, beforeManifest);
   assertMigrationDataPreserved(beforeManifest, afterManifest);
-  await verifyLiveWarrantyColumn(env, releaseRoot);
+  await verifyLiveAdditiveSchema(
+    env,
+    releaseRoot,
+    !beforeManifest.protectedShape?.tables?.stock_units
+  );
 
   const rollbackBranch = `rollback/pre-update-${Date.now()}`;
   await run('git', ['branch', rollbackBranch, currentCommit], { cwd: currentRoot });

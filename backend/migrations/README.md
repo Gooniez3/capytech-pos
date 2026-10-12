@@ -172,6 +172,40 @@ The updater first restores a complete backup into an isolated `capytech_verify_*
 database, applies this migration there, and compares protected table, inventory,
 invoice, image-reference, and sequence manifests before touching the live schema.
 
+## Phase 2B stock-unit and item-warranty schema
+
+`1791763200000_p2b-stock-unit-warranty-schema.mjs` is a transactional,
+forward-only additive migration. It adds disabled-by-default product policies,
+nullable variant overrides, nullable sale-item warranty/SKU snapshots, and the
+nullable checkout contract version. It does not update historical rows, alter
+existing SKU/price/quantity columns, or read or reset an existing sequence.
+
+The new `stock_units` table generates internal identifiers from the reserved
+`SU-` namespace and stores a generated normalized manufacturer serial with a
+unique constraint. A composite foreign key ensures that a selected variant
+belongs to the selected product. Lifecycle values are limited to `available`,
+`sold`, `quarantined`, and `retired`. Existing product and variant SKUs are
+validated against the reserved namespace; a collision aborts and rolls back the
+whole migration for manual review rather than rewriting the SKU.
+
+`stock_unit_events` is append-only through update, delete, and truncate guards.
+`sale_item_stock_units` preserves the internal-SKU and manufacturer-serial
+snapshots, rejects snapshot mutation/deletion, and uses a partial unique index to
+prevent more than one active invoice assignment per physical unit. Assignment
+release metadata remains mutable so a future reviewed refund/void flow can end an
+assignment while retaining its history.
+
+Protected-data manifests include all Phase 2B policy/snapshot columns whenever
+installed and include every new table and sequence. Migration rehearsal compares
+the pre-migration historical shape, then requires the newly created tables to be
+empty and their sequences untouched. Subsequent backups protect all stock-unit,
+event, assignment, and sequence values.
+
+The optional integration test refuses any database whose name does not match
+`capytech_phase2b_test_*` and also requires it to contain no public tables. Supply
+`CAPYTECH_PHASE2B_TEST_DATABASE_URL` only for a disposable PostgreSQL 17 or 18
+database. Never point it at `pos_store`.
+
 ## Implementation validation boundary
 
 Unit tests use in-memory metadata fixtures and compile SQL with the actual pinned

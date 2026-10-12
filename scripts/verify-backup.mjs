@@ -10,7 +10,10 @@ import {
   loadEnv,
   verifyChecksumManifest,
 } from './lib/backup-safety.mjs';
-import { captureProductionDataManifest } from './lib/production-data.mjs';
+import {
+  assertPhase2BMigrationInitialState,
+  captureProductionDataManifest,
+} from './lib/production-data.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isWindows = process.platform === 'win32';
@@ -210,6 +213,10 @@ async function main() {
           comparisonManifest: expected,
         });
         assertMigrationDataPreserved(expected, afterMigration);
+        if (!expected.protectedShape?.tables?.stock_units) {
+          await assertPhase2BMigrationInitialState(migratedClient);
+        }
+        await captureProductionDataManifest(migratedClient);
       } finally {
         await migratedClient.end();
       }

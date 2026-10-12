@@ -14,9 +14,14 @@ import {
   writeChecksumManifest,
 } from './lib/backup-safety.mjs';
 import {
+  ADDITIVE_PROTECTED_SEQUENCES,
+  ADDITIVE_PROTECTED_TABLE_COLUMNS,
   MANIFEST_FORMAT_VERSION,
   OPTIONAL_PROTECTED_COLUMNS,
+  PHASE2B_PROTECTED_COLUMNS,
+  PROTECTED_SEQUENCES,
   PROTECTED_TABLE_COLUMNS,
+  assertPhase2BMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -139,9 +144,102 @@ test('explicit manifest contract covers every immutable baseline column', () => 
   );
   assert.deepEqual(PROTECTED_TABLE_COLUMNS, baselineTables);
   assert.deepEqual(OPTIONAL_PROTECTED_COLUMNS, {
-    products: ['deleted_at', 'deleted_by'],
-    sales: ['checkout_request_fingerprint', 'warranty_months'],
+    product_variants: [
+      'serial_tracking_enabled', 'shop_warranty_enabled', 'shop_warranty_months',
+    ],
+    products: [
+      'deleted_at', 'deleted_by', 'serial_tracking_enabled',
+      'shop_warranty_enabled', 'shop_warranty_months',
+    ],
+    sale_items: [
+      'shop_warranty_eligible', 'shop_warranty_months', 'shop_warranty_start_date',
+      'shop_warranty_end_date', 'product_sku_snapshot', 'variant_sku_snapshot',
+    ],
+    sales: [
+      'checkout_request_fingerprint', 'warranty_months', 'checkout_contract_version',
+    ],
   });
+});
+
+test('Phase 2B protected-data contract includes feature rows, snapshots, and sequences', () => {
+  assert.deepEqual(PHASE2B_PROTECTED_COLUMNS.sales, ['checkout_contract_version']);
+  assert.deepEqual(Object.keys(ADDITIVE_PROTECTED_TABLE_COLUMNS), [
+    'stock_units', 'stock_unit_events', 'sale_item_stock_units',
+  ]);
+  assert.deepEqual(ADDITIVE_PROTECTED_SEQUENCES, {
+    stock_units: ['stock_units_id_seq', 'stock_unit_internal_sku_seq'],
+    stock_unit_events: ['stock_unit_events_id_seq'],
+    sale_item_stock_units: ['sale_item_stock_units_id_seq'],
+  });
+  assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.stock_units.includes('normalized_serial_number'));
+  assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.stock_unit_events.includes('metadata'));
+  assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.sale_item_stock_units.includes('internal_sku_snapshot'));
+  assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.sale_item_stock_units.includes('manufacturer_serial_number_snapshot'));
+});
+
+test('new manifests fail closed on a partially installed Phase 2B schema', async () => {
+  const baseRelations = new Set([
+    ...Object.keys(PROTECTED_TABLE_COLUMNS), ...PROTECTED_SEQUENCES,
+  ]);
+  const client = {
+    async query(sql, params = []) {
+      if (sql.includes('current_database()')) {
+        return { rows: [{ database: 'partial_phase2b_test', server_version: 'test' }] };
+      }
+      if (sql.includes('to_regclass')) {
+        const relation = params[0].replace('public.', '');
+        return { rows: [{ present: baseRelations.has(relation) }] };
+      }
+      if (sql.includes('information_schema.columns')) {
+        const columns = [...PROTECTED_TABLE_COLUMNS[params[0]]];
+        if (params[0] === 'products') columns.push('serial_tracking_enabled');
+        return { rows: columns.map((column_name) => ({ column_name })) };
+      }
+      throw new Error(`Unexpected partial-schema query: ${sql}`);
+    },
+  };
+  await assert.rejects(
+    captureProductionDataManifest(client),
+    /Protected Phase 2B schema is incomplete/
+  );
+});
+
+test('Phase 2B migration rehearsal requires empty feature tables and untouched sequences', async () => {
+  const rowsByTable = new Map(Object.entries(ADDITIVE_PROTECTED_TABLE_COLUMNS));
+  const sequenceNames = new Set(Object.values(ADDITIVE_PROTECTED_SEQUENCES).flat());
+  const makeClient = ({ populatedTable = null, advancedSequence = null } = {}) => ({
+    async query(sql, params = []) {
+      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('information_schema.columns')) {
+        return { rows: rowsByTable.get(params[0]).map((column_name) => ({ column_name })) };
+      }
+      if (sql.includes('SELECT COUNT(*)::text AS count FROM public.')) {
+        const table = sql.match(/public\."([a-z0-9_]+)"/)?.[1];
+        return { rows: [{ count: table === populatedTable ? '1' : '0' }] };
+      }
+      if (sql.includes('last_value::text')) {
+        const sequence = sql.match(/public\."([a-z0-9_]+)"/)?.[1];
+        assert.ok(sequenceNames.has(sequence));
+        return {
+          rows: [{
+            last_value: sequence === advancedSequence ? '2' : '1',
+            is_called: sequence === advancedSequence,
+          }],
+        };
+      }
+      throw new Error(`Unexpected Phase 2B rehearsal query: ${sql}`);
+    },
+  });
+
+  await assert.doesNotReject(assertPhase2BMigrationInitialState(makeClient()));
+  await assert.rejects(
+    assertPhase2BMigrationInitialState(makeClient({ populatedTable: 'stock_units' })),
+    /unexpectedly populated/
+  );
+  await assert.rejects(
+    assertPhase2BMigrationInitialState(makeClient({ advancedSequence: 'stock_units_id_seq' })),
+    /unexpectedly advanced/
+  );
 });
 
 test('migration comparison fails closed for unexpected historical table changes', () => {
@@ -239,6 +337,41 @@ test('comparison capture reuses the old explicit shape across additive schema ch
   assert.equal(queries.some(({ params }) => params[0] === 'future_empty_table'), false);
 });
 
+test('new manifests automatically protect the complete installed Phase 2B schema', async () => {
+  const client = {
+    async query(sql, params = []) {
+      if (sql.includes('current_database()')) {
+        return { rows: [{ database: 'capytech_phase2b_test_manifest', server_version: 'test' }] };
+      }
+      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('information_schema.columns')) {
+        const table = params[0];
+        const columns = ADDITIVE_PROTECTED_TABLE_COLUMNS[table]
+          || [...PROTECTED_TABLE_COLUMNS[table], ...(OPTIONAL_PROTECTED_COLUMNS[table] || [])];
+        return { rows: columns.map((column_name) => ({ column_name })) };
+      }
+      if (sql.includes('last_value::text')) {
+        return { rows: [{ last_value: '1', is_called: false }] };
+      }
+      if (sql.includes('WHERE image_path IS NOT NULL')) return { rows: [] };
+      if (sql.includes('COUNT(*)::text')) {
+        return { rows: [{ count: '0', digest: 'empty' }] };
+      }
+      throw new Error(`Unexpected manifest query: ${sql}`);
+    },
+  };
+
+  const manifest = await captureProductionDataManifest(client);
+  for (const [table, columns] of Object.entries(ADDITIVE_PROTECTED_TABLE_COLUMNS)) {
+    assert.deepEqual(manifest.protectedShape.tables[table], columns);
+    assert.deepEqual(manifest.tables[table], { count: '0', digest: 'empty' });
+  }
+  for (const sequence of Object.values(ADDITIVE_PROTECTED_SEQUENCES).flat()) {
+    assert.ok(manifest.protectedShape.sequences.includes(sequence));
+    assert.deepEqual(manifest.sequences[sequence], { last_value: '1', is_called: false });
+  }
+});
+
 test('dedicated updater cannot call destructive installation or preparation scripts', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'scripts', 'update-shop.mjs'), 'utf8');
   const verifier = fs.readFileSync(path.join(projectRoot, 'scripts', 'verify-backup.mjs'), 'utf8');
@@ -251,6 +384,8 @@ test('dedicated updater cannot call destructive installation or preparation scri
   assert.doesNotMatch(source, /Historical invoices were unexpectedly assigned warranty values/);
   assert.doesNotMatch(verifier, /warranty_months IS NOT NULL/);
   assert.match(verifier, /comparisonManifest: expected/);
+  assert.match(source, /assertPhase2BMigrationInitialState/);
+  assert.match(verifier, /assertPhase2BMigrationInitialState/);
   assert.match(source, /Reviewed release tracks protected persisted paths/);
   assert.match(source, /HTTPS certificates changed during update/);
   assert.match(source, /Pre-existing backup changed during update/);

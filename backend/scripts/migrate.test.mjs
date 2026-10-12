@@ -29,12 +29,18 @@ import {
   up as p10Up, down as p10Down, UP_SQL as P10_UP_SQL,
   CONSTRAINT_NAME as P10_CONSTRAINT_NAME,
 } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
+import {
+  up as p2bUp, down as p2bDown, UP_SQL as P2B_UP_SQL,
+  MIGRATION_NAME as P2B_MIGRATION_NAME, NEW_TABLES as P2B_NEW_TABLES,
+  NEW_SEQUENCES as P2B_NEW_SEQUENCES,
+} from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
 const P08 = '1788652800003_p08-product-recycle-bin';
 const P10 = '1791676800000_p10-invoice-warranty';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10];
+const P2B = '1791763200000_p2b-stock-unit-warranty-schema';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -181,12 +187,66 @@ test('installed node-pg-migrate loads all migrations deterministically without e
     await migrations[4].up(builder);
     return builder.getSql();
   };
+  const buildP2B=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[5].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
   assert.equal(await buildP06(),await buildP06());
   assert.equal(await buildP08(),await buildP08());
   assert.equal(await buildP10(),await buildP10());
+  assert.equal(await buildP2B(),await buildP2B());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('Phase 2B is additive, forward-only, transactional, and preserves legacy storage',()=>{
+  assert.equal(P2B_MIGRATION_NAME,P2B);
+  assert.deepEqual(P2B_NEW_TABLES,[
+    'stock_units','stock_unit_events','sale_item_stock_units',
+  ]);
+  assert.deepEqual(P2B_NEW_SEQUENCES,[
+    'stock_units_id_seq','stock_unit_internal_sku_seq',
+    'stock_unit_events_id_seq','sale_item_stock_units_id_seq',
+  ]);
+  assert.doesNotMatch(P2B_UP_SQL,/^\s*(INSERT|UPDATE|DELETE|DROP|TRUNCATE|SETVAL|RESTART)\b/im);
+  assert.doesNotMatch(P2B_UP_SQL,/\binvoice_number_seq\b/i);
+  assert.doesNotMatch(P2B_UP_SQL,/ALTER\s+COLUMN\s+(sku|price|stock_quantity)\b/i);
+  assert.match(P2B_UP_SQL,/ADD COLUMN serial_tracking_enabled boolean NOT NULL DEFAULT FALSE/);
+  assert.match(P2B_UP_SQL,/ADD COLUMN shop_warranty_enabled boolean NOT NULL DEFAULT FALSE/);
+  assert.match(P2B_UP_SQL,/ADD COLUMN checkout_contract_version smallint/);
+  assert.match(P2B_UP_SQL,/products_sku_reserved_namespace_chk/);
+  assert.match(P2B_UP_SQL,/product_variants_sku_reserved_namespace_chk/);
+  assert.throws(p2bDown,/intentionally blocked/);
+
+  const client=catalogClient(empty());
+  const builder=new MigrationBuilder(client,{},false,console);
+  p2bUp(builder);
+  assert.ok(builder.getSql().includes(P2B_UP_SQL));
+  assert.deepEqual(client.queries,[]);
+});
+
+test('Phase 2B defines serial uniqueness, variant ownership, lifecycle, and immutable history',()=>{
+  assert.match(P2B_UP_SQL,/normalized_serial_number text GENERATED ALWAYS AS/);
+  assert.match(P2B_UP_SQL,/UNIQUE \(normalized_serial_number\)/);
+  assert.match(P2B_UP_SQL,/DEFAULT \('SU-' \|\| nextval\('public\.stock_unit_internal_sku_seq'/);
+  assert.match(P2B_UP_SQL,/CHECK \(internal_sku ~ '\^SU-\[0-9\]\+\$'\)/);
+  assert.match(P2B_UP_SQL,/FOREIGN KEY \(product_id, variant_id\)[\s\S]*REFERENCES public\.product_variants\(product_id, id\)/);
+  assert.match(P2B_UP_SQL,/state IN \('available', 'sold', 'quarantined', 'retired'\)/);
+  assert.match(P2B_UP_SQL,/sale_item_stock_units_one_active_unit_idx[\s\S]*WHERE released_at IS NULL/);
+  assert.match(P2B_UP_SQL,/stock_unit_events_immutable_row_trg/);
+  assert.match(P2B_UP_SQL,/stock_unit_events_immutable_truncate_trg/);
+  assert.match(P2B_UP_SQL,/sale_item_stock_units_snapshot_immutable_trg/);
+});
+
+test('Phase 2B warranty policies and sale snapshots retain legacy NULL compatibility',()=>{
+  assert.match(P2B_UP_SQL,/shop_warranty_months IN \(1, 3, 6, 12\)/);
+  assert.match(P2B_UP_SQL,/shop_warranty_enabled IS NULL AND shop_warranty_months IS NULL/);
+  assert.match(P2B_UP_SQL,/shop_warranty_eligible IS NULL[\s\S]*shop_warranty_months IS NULL/);
+  assert.match(P2B_UP_SQL,/ADD COLUMN product_sku_snapshot character varying\(50\)/);
+  assert.match(P2B_UP_SQL,/ADD COLUMN variant_sku_snapshot character varying\(80\)/);
+  assert.doesNotMatch(P2B_UP_SQL,/ALTER TABLE public\.sales[\s\S]*ALTER COLUMN warranty_months/);
 });
 
 test('P1.0 adds only nullable warranty metadata and never rewrites history or sequences',()=>{
