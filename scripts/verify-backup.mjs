@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertDataManifestEqual,
+  assertMigrationDataPreserved,
   assertSafeVerificationDatabase,
   loadEnv,
   verifyChecksumManifest,
@@ -155,7 +156,9 @@ async function main() {
     let actual;
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-      actual = await captureProductionDataManifest(client);
+      actual = await captureProductionDataManifest(client, {
+        comparisonManifest: expected,
+      });
       await client.query('COMMIT');
     } finally {
       await client.end();
@@ -203,14 +206,10 @@ async function main() {
         ) {
           throw new Error('Warranty migration did not create the expected nullable, default-free column.');
         }
-        const changedHistory = await migratedClient.query(
-          'SELECT COUNT(*)::text AS count FROM public.sales WHERE warranty_months IS NOT NULL'
-        );
-        if (changedHistory.rows[0].count !== '0') {
-          throw new Error('Warranty migration modified historical invoices.');
-        }
-        const afterMigration = await captureProductionDataManifest(migratedClient);
-        assertDataManifestEqual(expected, afterMigration);
+        const afterMigration = await captureProductionDataManifest(migratedClient, {
+          comparisonManifest: expected,
+        });
+        assertMigrationDataPreserved(expected, afterMigration);
       } finally {
         await migratedClient.end();
       }

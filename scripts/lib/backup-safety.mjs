@@ -140,24 +140,46 @@ export function copyDirectory(source, destination) {
   });
 }
 
-export function assertDataManifestEqual(expected, actual) {
-  const protectedExpected = {
-    tables: expected.tables,
-    sequences: expected.sequences,
-    inventory: expected.inventory,
-    invoices: expected.invoices,
-    imageReferences: expected.imageReferences,
-  };
-  const protectedActual = {
-    tables: actual.tables,
-    sequences: actual.sequences,
-    inventory: actual.inventory,
-    invoices: actual.invoices,
-    imageReferences: actual.imageReferences,
-  };
-  if (
-    JSON.stringify(protectedExpected) !== JSON.stringify(protectedActual)
-  ) {
-    throw new Error('Restored database does not match the protected-data manifest.');
+function protectedManifestData(manifest) {
+  if (![1, 2].includes(manifest?.formatVersion)) {
+    throw new Error(`Unsupported protected-data manifest format: ${manifest?.formatVersion}`);
   }
+  if (manifest.formatVersion === 2 && !manifest.protectedShape) {
+    throw new Error('Version 2 protected-data manifest is missing its explicit shape.');
+  }
+  return {
+    formatVersion: manifest.formatVersion,
+    ...(manifest.formatVersion === 2
+      ? { protectedShape: manifest.protectedShape }
+      : {}),
+    tables: manifest.tables,
+    sequences: manifest.sequences,
+    inventory: manifest.inventory,
+    invoices: manifest.invoices,
+    imageReferences: manifest.imageReferences,
+  };
+}
+
+function assertProtectedManifestEqual(expected, actual, message) {
+  const protectedExpected = protectedManifestData(expected);
+  const protectedActual = protectedManifestData(actual);
+  if (JSON.stringify(protectedExpected) !== JSON.stringify(protectedActual)) {
+    throw new Error(message);
+  }
+}
+
+export function assertDataManifestEqual(expected, actual) {
+  assertProtectedManifestEqual(
+    expected,
+    actual,
+    'Restored database does not match the protected-data manifest.'
+  );
+}
+
+export function assertMigrationDataPreserved(before, after) {
+  assertProtectedManifestEqual(
+    before,
+    after,
+    'Additive migration changed protected historical data.'
+  );
 }

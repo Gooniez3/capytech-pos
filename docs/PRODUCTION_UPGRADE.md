@@ -46,7 +46,7 @@ The backup script:
 
 - reads the live `backend/.env` and resolves `PRODUCT_IMAGES_DIR` using the same backend-relative rules as the application;
 - makes a custom-format PostgreSQL dump without changing the database;
-- captures counts/digests for protected tables, stock, invoices, image references, and sequence values;
+- captures a versioned, explicit protected-data manifest for historical table columns, stock, invoices, image references, and sequence values;
 - copies the complete image root, including product files, trash, and sidecar metadata;
 - copies `.env`, frontend certificates, launchers, dependency lockfiles, and Git revision/status metadata;
 - writes SHA-256 checksums and immediately verifies them;
@@ -54,6 +54,14 @@ The backup script:
 - copies the completed folder to every writable external macOS volume it finds and re-verifies its checksums.
 
 The restore verifier does not trust a successful dump command. It verifies SHA-256 hashes, creates a uniquely named `capytech_verify_*` database, restores the dump with `--single-transaction --exit-on-error`, compares protected data and image references, applies pending migrations only to that isolated database, and verifies that historical rows, stock, invoices, images, and sequences are unchanged. Failed verification databases are retained for diagnosis. A successful one is removed unless `--keep-database` is supplied.
+
+### Protected-data manifest rules
+
+New backups use manifest format 2. The manifest records the exact protected table columns and sequences used for its content digests. Every value in those columns is protected, including nullable values. In particular, `sales.warranty_months` is included whenever that reviewed column exists, so `NULL`, explicit `0`, and positive durations such as `1`, `3`, `6`, and `12` are preserved exactly.
+
+Restore verification uses an exact comparison against the manifest saved with the backup. Migration rehearsal reuses the pre-migration manifest's explicit shape. This means a reviewed migration may add a nullable column or an empty table without changing the historical digest, while any change to a pre-existing protected value, row count, inventory quantity, image reference, or sequence still fails closed. A feature's new columns and tables must be added to the manifest contract before the application begins storing production data in them.
+
+Legacy format-1 backups remain restorable using their original comparison rules. Because an old manifest cannot retroactively contain a value it never captured, always create and verify a fresh format-2 backup before a production upgrade.
 
 The backup does not export Safari/Chrome private local storage. Keep the existing browser profile and `https://localhost:5173` origin unchanged, and retain a Time Machine backup. The authentication fix removes only the stored user and token; it does not clear the cart-draft key.
 
@@ -66,7 +74,7 @@ The backup does not export Safari/Chrome private local storage. Keep the existin
 5. The updater installs/builds the candidate, creates and restores a new backup, rehearses the migration in the isolated database, records a live read-only manifest, applies only reviewed migrations to the configured database, checks protected data again, creates a rollback branch, and fast-forwards the application source.
 6. Do not reopen the counter until the verification below is complete.
 
-The warranty migration is additive and forward-only: it adds a nullable, default-free `sales.warranty_months` column plus a value constraint. Existing invoice rows remain `NULL`; no row is updated and no sequence is reset.
+The warranty migration is additive and forward-only: it adds a nullable, default-free `sales.warranty_months` column plus a value constraint. On a database where that migration is first applied, existing invoice rows remain `NULL`; no row is updated and no sequence is reset. On later upgrades, already recorded invoice warranties may legitimately be `NULL`, `0`, `1`, `3`, `6`, or `12`, and the version-2 manifest requires every saved value to remain unchanged.
 
 ## Post-update verification
 
@@ -75,7 +83,7 @@ Using read-only screens and queries first, compare the preflight manifest and ba
 - All protected table counts and content digests match.
 - Products, categories, customers, users/roles, settings, and historical sales are present.
 - Product and variant quantities match, including low-stock items.
-- Historical invoice totals/statuses and the newest invoice number match.
+- Historical invoice totals, statuses, saved warranty values, and the newest invoice number match.
 - Every protected sequence, especially `invoice_number_seq`, has the same value/state.
 - All active product images open; image trash and sidecar metadata remain present.
 - `backend/.env` SHA-256 and the complete product-image directory SHA-256 listing are unchanged.

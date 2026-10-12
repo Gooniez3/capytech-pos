@@ -5,7 +5,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  assertDataManifestEqual,
+  assertMigrationDataPreserved,
   loadEnv,
   relativeFiles,
   resolveProductImagesDir,
@@ -83,7 +83,7 @@ function directoryDigest(root) {
   ]);
 }
 
-async function captureLiveManifest(env, packageRoot) {
+async function captureLiveManifest(env, packageRoot, comparisonManifest = null) {
   const requireFromBackend = createRequire(path.join(packageRoot, 'backend', 'package.json'));
   const { Client } = requireFromBackend('pg');
   const client = new Client({
@@ -97,7 +97,9 @@ async function captureLiveManifest(env, packageRoot) {
   await client.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const manifest = await captureProductionDataManifest(client);
+    const manifest = await captureProductionDataManifest(client, {
+      comparisonManifest,
+    });
     await client.query('COMMIT');
     return manifest;
   } catch (error) {
@@ -108,7 +110,7 @@ async function captureLiveManifest(env, packageRoot) {
   }
 }
 
-async function verifyLiveWarrantyMigration(env, packageRoot) {
+async function verifyLiveWarrantyColumn(env, packageRoot) {
   const requireFromBackend = createRequire(path.join(packageRoot, 'backend', 'package.json'));
   const { Client } = requireFromBackend('pg');
   const client = new Client({
@@ -134,12 +136,6 @@ async function verifyLiveWarrantyMigration(env, packageRoot) {
       column.rows[0].column_default !== null
     ) {
       throw new Error('Live warranty column is not nullable and default-free.');
-    }
-    const changedHistory = await client.query(
-      'SELECT COUNT(*)::text AS count FROM public.sales WHERE warranty_months IS NOT NULL'
-    );
-    if (changedHistory.rows[0].count !== '0') {
-      throw new Error('Historical invoices were unexpectedly assigned warranty values.');
     }
   } finally {
     await client.end();
@@ -270,9 +266,9 @@ async function main() {
     cwd: path.join(releaseRoot, 'backend'),
     env: databaseEnvironment,
   });
-  const afterManifest = await captureLiveManifest(env, releaseRoot);
-  assertDataManifestEqual(beforeManifest, afterManifest);
-  await verifyLiveWarrantyMigration(env, releaseRoot);
+  const afterManifest = await captureLiveManifest(env, releaseRoot, beforeManifest);
+  assertMigrationDataPreserved(beforeManifest, afterManifest);
+  await verifyLiveWarrantyColumn(env, releaseRoot);
 
   const rollbackBranch = `rollback/pre-update-${Date.now()}`;
   await run('git', ['branch', rollbackBranch, currentCommit], { cwd: currentRoot });
