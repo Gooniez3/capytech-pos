@@ -18,6 +18,8 @@
     "test:stock-unit-integration": "node --test scripts/stock-unit-service.integration.test.mjs",
     "test:quantity-inventory": "node --test src/services/quantity-inventory-service.test.js",
     "test:quantity-inventory-integration": "node --test scripts/quantity-inventory.integration.test.mjs",
+    "test:product-workflow": "node --test src/services/product-workflow-service.test.js",
+    "test:product-workflow-integration": "node --test scripts/product-workflow.integration.test.mjs",
     "test:inventory-api": "node --test src/services/inventory-api.test.js",
     "test:inventory-api-integration": "node --test scripts/inventory-api.integration.test.mjs",
     "test:serialized-checkout-integration": "node --test scripts/serialized-checkout.integration.test.mjs",

@@ -1853,6 +1853,13 @@ router.delete(
 
         WHERE id = $1
           AND product_id = $2
+          AND stock_quantity = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM sale_items si WHERE si.variant_id = product_variants.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM stock_units su WHERE su.variant_id = product_variants.id
+          )
 
         RETURNING id
         `,
@@ -1863,8 +1870,15 @@ router.delete(
       );
 
       if (result.rows.length === 0) {
-        return res.status(404).json({
-          error: 'Variant not found',
+        const existing = await pool.query(
+          `SELECT id FROM product_variants WHERE id=$1 AND product_id=$2 AND is_active=TRUE`,
+          [req.params.variantId, req.params.id]
+        );
+        return res.status(existing.rowCount ? 409 : 404).json({
+          error: existing.rowCount
+            ? 'A variant with stock, sales, stock units, or warranty snapshots cannot be removed'
+            : 'Variant not found',
+          ...(existing.rowCount ? { code: 'VARIANT_REFERENCED' } : {}),
         });
       }
 

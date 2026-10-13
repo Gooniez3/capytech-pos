@@ -45,6 +45,8 @@ interface ApiProduct {
 
   variant_count?: number | string;
   has_variants?: boolean;
+  serial_tracking_enabled?: boolean;
+  effective_serial_tracking_enabled?: boolean;
 }
 
 interface ApiCategory {
@@ -93,6 +95,7 @@ interface ProductView extends Product {
 
   imageUrl?: string | null;
   imagePath?: string | null;
+  serialTrackingEnabled: boolean;
 }
 
 interface ProductForm {
@@ -103,6 +106,8 @@ interface ProductForm {
   cost: string;
   stock: string;
   reorderLevel: string;
+  serialTrackingEnabled: boolean;
+  serialNumbers: string;
 }
 interface ApiVariant {
   id: number | string;
@@ -114,6 +119,8 @@ interface ApiVariant {
   stock_quantity: number | string;
   low_stock_threshold: number | string;
   is_active?: boolean;
+  serial_tracking_enabled?: boolean | null;
+  effective_serial_tracking_enabled?: boolean;
 }
 
 interface VariantForm {
@@ -125,6 +132,8 @@ interface VariantForm {
   stock: string;
   reorderLevel: string;
   isNew?: boolean;
+  serialSetting: 'inherit' | 'on' | 'off';
+  serialNumbers: string;
 }
 
 const emptyForm: ProductForm = {
@@ -135,6 +144,8 @@ const emptyForm: ProductForm = {
   cost: '',
   stock: '',
   reorderLevel: '5',
+  serialTrackingEnabled: false,
+  serialNumbers: '',
 };
 
 function mapProduct(product: ApiProduct): ProductView {
@@ -170,6 +181,9 @@ function mapProduct(product: ApiProduct): ProductView {
       Number(product.variant_count ?? 0) > 0,
      imageUrl: product.image_url ?? null,
      imagePath: product.image_path ?? null, 
+    serialTrackingEnabled:
+      product.effective_serial_tracking_enabled === true ||
+      product.serial_tracking_enabled === true,
   };
 }
 
@@ -292,6 +306,7 @@ const [form, setForm] =
 
   const [variants, setVariants] =
   useState<VariantForm[]>([]);
+  const [removedVariantIds, setRemovedVariantIds] = useState<string[]>([]);
   const [expandedProductId, setExpandedProductId] =
   useState<string | null>(null);
 
@@ -612,6 +627,8 @@ async function restoreTrashedImage() {
       stock: '0',
       reorderLevel: '2',
       isNew: true,
+      serialSetting: 'inherit',
+      serialNumbers: '',
     },
   ]);
 }
@@ -648,35 +665,9 @@ async function removeVariant(index: number) {
   if (!variant) return;
 
   if (variant.id && editingProduct) {
-    const confirmed = window.confirm(
-      `Remove variant "${variant.name}"?`
-    );
-
+    const confirmed = window.confirm(`Remove variant "${variant.name}" when changes are saved?`);
     if (!confirmed) return;
-
-    try {
-      await api.delete<{ message: string }>(
-        `/api/products/${editingProduct.id}/variants/${variant.id}`
-      );
-
-      setVariants((current) =>
-        current.filter((_, i) => i !== index)
-      );
-
-      toast(
-        'Variant removed successfully.',
-        'success'
-      );
-    } catch (error) {
-      toast(
-        error instanceof Error
-          ? error.message
-          : 'Failed to remove variant.',
-        'error'
-      );
-    }
-
-    return;
+    setRemovedVariantIds((current) => [...current, variant.id!]);
   }
 
   setVariants((current) =>
@@ -694,6 +685,7 @@ async function removeVariant(index: number) {
   });
 
   setVariants([]);
+  setRemovedVariantIds([]);
   resetImageState();
   setAddOpen(true);
 }
@@ -719,6 +711,8 @@ async function openEditProduct(
     reorderLevel: String(
       product.reorderLevel
     ),
+    serialTrackingEnabled: product.serialTrackingEnabled,
+    serialNumbers: '',
   });
 
   setVariants([]);
@@ -755,6 +749,10 @@ async function openEditProduct(
         ),
 
         isNew: false,
+        serialSetting: variant.serial_tracking_enabled === null
+          ? 'inherit'
+          : variant.serial_tracking_enabled ? 'on' : 'off',
+        serialNumbers: '',
       }))
     );
   } catch (error) {
@@ -790,6 +788,7 @@ async function openEditProduct(
   setEditingProduct(null);
   setForm(emptyForm);
   setVariants([]);
+  setRemovedVariantIds([]);
   resetImageState();
 }
 
@@ -901,198 +900,68 @@ async function openEditProduct(
     return;
   }
 
+  if (!editingProduct) {
+    const normalizeSerial = (value: string) => value.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    const validateSerials = (label: string, quantity: number, value: string, tracked: boolean) => {
+      const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const normalized = lines.map(normalizeSerial);
+      if (!tracked && lines.length) return `${label}: remove serial numbers or enable serial tracking.`;
+      if (tracked && lines.length !== quantity) return `${label}: enter exactly ${quantity} serial numbers.`;
+      if (normalized.some((serial) => !serial) || new Set(normalized).size !== normalized.length) {
+        return `${label}: serial numbers must be valid and unique.`;
+      }
+      return null;
+    };
+    const serialError = variants.length
+      ? variants.map((variant, index) => validateSerials(
+        `Variant ${index + 1}`,
+        Number(variant.stock || 0),
+        variant.serialNumbers,
+        variant.serialSetting === 'on'
+          || (variant.serialSetting === 'inherit' && form.serialTrackingEnabled)
+      )).find(Boolean)
+      : validateSerials('Product', stock, form.serialNumbers, form.serialTrackingEnabled);
+    if (serialError) {
+      toast(serialError, 'error');
+      return;
+    }
+  }
+
   setSaving(true);
 
   try {
-    let productId: string;
-
-    if (editingProduct) {
-  const productFormData =
-    new FormData();
-
-  productFormData.append(
-  'sku',
-  form.sku
-    .trim()
-    .toUpperCase()
-);    
-      
-
-  productFormData.append(
-    'name',
-    form.name.trim()
-  );
-
-  productFormData.append(
-    'category_id',
-    form.categoryId
-  );
-
-  productFormData.append(
-    'price',
-    String(price)
-  );
-
-  productFormData.append(
-    'cost',
-    String(cost)
-  );
-
-  productFormData.append(
-    'stock_quantity',
-    String(
-      variants.length > 0
-        ? 0
-        : stock
-    )
-  );
-
-  productFormData.append(
-    'low_stock_threshold',
-    String(reorderLevel)
-  );
-
-  if (selectedImage) {
-    productFormData.append(
-      'image',
-      selectedImage
-    );
-  }
-
-  await api.put<ApiProduct>(
-    `/api/products/${editingProduct.id}`,
-    productFormData
-  );
-
-  productId = editingProduct.id;
-}else {
-  const productFormData =
-    new FormData();
-
-  productFormData.append(
-    'sku',
-    form.sku
-      .trim()
-      .toUpperCase()
-  );
-
-  productFormData.append(
-    'name',
-    form.name.trim()
-  );
-
-  productFormData.append(
-    'category_id',
-    form.categoryId
-  );
-
-  productFormData.append(
-    'price',
-    String(price)
-  );
-
-  productFormData.append(
-    'cost',
-    String(cost)
-  );
-
-  productFormData.append(
-    'stock_quantity',
-    String(
-      variants.length > 0
-        ? 0
-        : stock
-    )
-  );
-
-  productFormData.append(
-    'low_stock_threshold',
-    String(reorderLevel)
-  );
-
-  if (selectedImage) {
-    productFormData.append(
-      'image',
-      selectedImage
-    );
-  }
-
-  productFormData.append(
-  'variants',
-  JSON.stringify(
-    variants.map((variant) => ({
-      name: variant.name.trim(),
-      sku: variant.sku.trim().toUpperCase(),
-      price:
-        variant.price.trim() === ''
-          ? null
-          : Number(variant.price),
-      cost:
-        variant.cost.trim() === ''
-          ? null
-          : Number(variant.cost),
-      stock_quantity: Number(
-        variant.stock || 0
-      ),
-      low_stock_threshold: Number(
-        variant.reorderLevel || 2
-      ),
-    }))
-  )
-);
-
-  const createdProduct =
-    await api.post<ApiProduct>(
-      '/api/products',
-      productFormData
-    );
-
-  productId =
-    String(createdProduct.id);
-}
-
-    // Save variants
-    if (editingProduct) {
-  for (const variant of variants) {
-      const payload = {
+    const serialLines = (value: string) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const productFormData = new FormData();
+    productFormData.append('workflow', JSON.stringify({
+      name: form.name.trim(),
+      sku: form.sku.trim().toUpperCase(),
+      category_id: form.categoryId || null,
+      price,
+      cost,
+      opening_quantity: editingProduct ? 0 : variants.length ? 0 : stock,
+      low_stock_threshold: reorderLevel,
+      serial_tracking_enabled: form.serialTrackingEnabled,
+      serial_numbers: editingProduct || variants.length ? [] : serialLines(form.serialNumbers ?? ''),
+      removed_variant_ids: editingProduct ? removedVariantIds.map(Number) : [],
+      variants: variants.map((variant) => ({
+        id: variant.id ? Number(variant.id) : null,
         name: variant.name.trim(),
-
-        sku: variant.sku
-          .trim()
-          .toUpperCase(),
-
-        price:
-          variant.price.trim() === ''
-            ? null
-            : Number(variant.price),
-
-        cost:
-          variant.cost.trim() === ''
-            ? null
-            : Number(variant.cost),
-
-        stock_quantity: Number(
-          variant.stock || 0
-        ),
-
-        low_stock_threshold: Number(
-          variant.reorderLevel || 2
-        ),
-      };
-
-      if (variant.id) {
-        await api.put<ApiVariant>(
-          `/api/products/${productId}/variants/${variant.id}`,
-          payload
-        );
-      } else {
-        await api.post<ApiVariant>(
-          `/api/products/${productId}/variants`,
-          payload
-        );
-      }
+        sku: variant.sku.trim().toUpperCase(),
+        price: variant.price.trim() === '' ? price : Number(variant.price),
+        cost: variant.cost.trim() === '' ? cost : Number(variant.cost),
+        opening_quantity: editingProduct ? 0 : Number(variant.stock || 0),
+        low_stock_threshold: Number(variant.reorderLevel || 2),
+        serial_tracking_enabled: variant.serialSetting === 'inherit'
+          ? 'inherit' : variant.serialSetting === 'on',
+        serial_numbers: editingProduct ? [] : serialLines(variant.serialNumbers),
+      })),
+    }));
+    if (selectedImage) productFormData.append('image', selectedImage);
+    if (editingProduct) {
+      await api.put(`/api/products/${editingProduct.id}/workflow`, productFormData);
+    } else {
+      await api.post('/api/products/workflow', productFormData);
     }
-  }
 
     toast(
       editingProduct
@@ -1105,6 +974,7 @@ async function openEditProduct(
     setEditingProduct(null);
     setForm(emptyForm);
     setVariants([]);
+    setRemovedVariantIds([]);
     setProductVariants({});
 setExpandedProductId(null);
   
@@ -2193,7 +2063,6 @@ function printBarcodeLabel({
   updateForm('sku', e.target.value)
 }
             placeholder="e.g. KB-LGX-001"
-            disabled={!!editingProduct}
           />
 
           <Select
@@ -2254,7 +2123,7 @@ function printBarcodeLabel({
           />
 
           <Input
-            label="Stock Quantity"
+            label={editingProduct ? 'Current Stock (read-only)' : 'Opening Stock'}
             name="stock"
             type="number"
             min="0"
@@ -2266,7 +2135,40 @@ function printBarcodeLabel({
               )
             }
             placeholder="24"
+            disabled={!!editingProduct || variants.length > 0}
           />
+
+          <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+            <input
+              type="checkbox"
+              checked={form.serialTrackingEnabled}
+              onChange={(event) => setForm((current) => ({
+                ...current,
+                serialTrackingEnabled: event.target.checked,
+              }))}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span>
+              <span className="block text-sm font-medium text-slate-700">Track individual serial numbers</span>
+              <span className="block text-xs text-slate-500">Serialized stock becomes sellable only after every physical unit is registered.</span>
+            </span>
+          </label>
+
+          {!editingProduct && variants.length === 0 && form.serialTrackingEnabled && (
+            <label className="sm:col-span-2 text-sm font-medium text-slate-700">
+              Opening manufacturer serial numbers
+              <textarea
+                value={form.serialNumbers}
+                onChange={(event) => updateForm('serialNumbers', event.target.value)}
+                rows={5}
+                placeholder="Scan or enter one serial number per line"
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              />
+              <span className="mt-1 block text-xs font-normal text-slate-500">
+                {form.serialNumbers.split(/\r?\n/).filter((line) => line.trim()).length} of {Number(form.stock || 0)} serials entered
+              </span>
+            </label>
+          )}
 
           {/* Low Stock */}
 <Input
@@ -2347,6 +2249,7 @@ function printBarcodeLabel({
                 )
               }
               placeholder="Stock"
+              disabled={!!editingProduct}
               className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
             />
 
@@ -2372,6 +2275,48 @@ function printBarcodeLabel({
             placeholder="Variant SKU"
             className="mt-2 h-8 w-full rounded-md border border-slate-300 bg-white px-2 font-mono text-xs text-slate-600 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
           />
+          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <input
+              type="number"
+              min="0"
+              value={variant.price}
+              onChange={(event) => updateVariant(index, 'price', event.target.value)}
+              placeholder={`Selling price (${form.price || 'product'})`}
+              className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500"
+            />
+            <input
+              type="number"
+              min="0"
+              value={variant.cost}
+              onChange={(event) => updateVariant(index, 'cost', event.target.value)}
+              placeholder={`Cost (${form.cost || 'product'})`}
+              className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500"
+            />
+            <select
+              value={variant.serialSetting}
+              onChange={(event) => updateVariant(index, 'serialSetting', event.target.value)}
+              className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500"
+            >
+              <option value="inherit">Inherit product tracking</option>
+              <option value="on">Serial tracking on</option>
+              <option value="off">Serial tracking off</option>
+            </select>
+          </div>
+          {!editingProduct && (
+            variant.serialSetting === 'on'
+            || (variant.serialSetting === 'inherit' && form.serialTrackingEnabled)
+          ) && (
+            <label className="mt-2 block text-xs font-medium text-slate-600">
+              Manufacturer serials ({variant.serialNumbers.split(/\r?\n/).filter((line) => line.trim()).length} of {Number(variant.stock || 0)})
+              <textarea
+                value={variant.serialNumbers}
+                onChange={(event) => updateVariant(index, 'serialNumbers', event.target.value)}
+                rows={3}
+                placeholder="Scan or enter one serial number per line"
+                className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 font-mono text-xs outline-none focus:border-brand-500"
+              />
+            </label>
+          )}
           </div>
       ))}
 

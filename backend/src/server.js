@@ -18,6 +18,8 @@ const authRoutes =
 
 const productRoutes =
   require('./routes/products');
+const productWorkflowRoutes =
+  require('./routes/product-workflows');
 
 const salesRoutes =
   require('./routes/sales');
@@ -112,6 +114,11 @@ app.use(
 app.use(
   '/api/products',
   inventoryPolicyRoutes
+);
+
+app.use(
+  '/api/products',
+  productWorkflowRoutes
 );
 
 app.use(
