@@ -107,6 +107,20 @@ export const ADDITIVE_PROTECTED_SEQUENCES = Object.freeze({
   sale_item_stock_units: Object.freeze(['sale_item_stock_units_id_seq']),
 });
 
+// Phase 3A is independently optional so pre-3A backups remain comparable.
+// Once installed, every ledger value and its owned sequence are protected.
+export const PHASE3A_PROTECTED_TABLE_COLUMNS = Object.freeze({
+  inventory_movements: Object.freeze([
+    'id', 'product_id', 'variant_id', 'movement_type', 'quantity_change',
+    'quantity_before', 'quantity_after', 'actor_user_id', 'reason',
+    'source_reference', 'occurred_at',
+  ]),
+});
+
+export const PHASE3A_PROTECTED_SEQUENCES = Object.freeze({
+  inventory_movements: Object.freeze(['inventory_movements_id_seq']),
+});
+
 export const PROTECTED_TABLES = Object.freeze(
   Object.keys(PROTECTED_TABLE_COLUMNS)
 );
@@ -237,10 +251,65 @@ async function currentProtectedShape(client) {
   ) {
     throw new Error('Protected Phase 2B schema is incomplete.');
   }
+  for (const [table, columns] of Object.entries(PHASE3A_PROTECTED_TABLE_COLUMNS)) {
+    const tablePresent = await relationExists(client, table);
+    const tableSequences = PHASE3A_PROTECTED_SEQUENCES[table] || [];
+    const sequencePresence = await Promise.all(
+      tableSequences.map((sequence) => relationExists(client, sequence))
+    );
+    if (!tablePresent) {
+      if (sequencePresence.some(Boolean)) {
+        throw new Error(`Protected Phase 3A schema is incomplete for public.${table}.`);
+      }
+      continue;
+    }
+    if (sequencePresence.some((present) => !present)) {
+      throw new Error(`Protected Phase 3A sequences are missing for public.${table}.`);
+    }
+    const available = await tableColumnNames(client, table);
+    const missing = columns.filter((column) => !available.has(column));
+    if (missing.length > 0) {
+      throw new Error(`Protected Phase 3A columns are missing from public.${table}: ${missing.join(', ')}`);
+    }
+    tables[table] = [...columns];
+    sequences.push(...tableSequences);
+  }
   return validateProtectedShape({
     tables,
     sequences,
   });
+}
+
+export async function assertPhase3AMigrationInitialState(client) {
+  for (const [table, columns] of Object.entries(PHASE3A_PROTECTED_TABLE_COLUMNS)) {
+    if (!(await relationExists(client, table))) {
+      throw new Error(`Phase 3A table is missing: public.${table}`);
+    }
+    const available = await tableColumnNames(client, table);
+    const missing = columns.filter((column) => !available.has(column));
+    if (missing.length > 0) {
+      throw new Error(`Phase 3A columns are missing from public.${table}: ${missing.join(', ')}`);
+    }
+    const count = await client.query(
+      `SELECT COUNT(*)::text AS count FROM public.${identifier(table)}`
+    );
+    if (count.rows[0]?.count !== '0') {
+      throw new Error(`Phase 3A migration unexpectedly populated public.${table}.`);
+    }
+  }
+  for (const sequences of Object.values(PHASE3A_PROTECTED_SEQUENCES)) {
+    for (const sequence of sequences) {
+      if (!(await relationExists(client, sequence))) {
+        throw new Error(`Phase 3A sequence is missing: public.${sequence}`);
+      }
+      const state = await client.query(
+        `SELECT last_value::text AS last_value, is_called FROM public.${identifier(sequence)}`
+      );
+      if (state.rows[0]?.last_value !== '1' || state.rows[0]?.is_called !== false) {
+        throw new Error(`Phase 3A migration unexpectedly advanced public.${sequence}.`);
+      }
+    }
+  }
 }
 
 export async function assertPhase2BMigrationInitialState(client) {

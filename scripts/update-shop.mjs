@@ -13,6 +13,7 @@ import {
 } from './lib/backup-safety.mjs';
 import {
   assertPhase2BMigrationInitialState,
+  assertPhase3AMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -113,7 +114,7 @@ async function captureLiveManifest(env, packageRoot, comparisonManifest = null) 
   }
 }
 
-async function verifyLiveAdditiveSchema(env, packageRoot, expectEmptyPhase2B) {
+async function verifyLiveAdditiveSchema(env, packageRoot, expectations) {
   const requireFromBackend = createRequire(path.join(packageRoot, 'backend', 'package.json'));
   const { Client } = requireFromBackend('pg');
   const client = new Client({
@@ -140,8 +141,11 @@ async function verifyLiveAdditiveSchema(env, packageRoot, expectEmptyPhase2B) {
     ) {
       throw new Error('Live warranty column is not nullable and default-free.');
     }
-    if (expectEmptyPhase2B) {
+    if (expectations.phase2B) {
       await assertPhase2BMigrationInitialState(client);
+    }
+    if (expectations.phase3A) {
+      await assertPhase3AMigrationInitialState(client);
     }
     await captureProductionDataManifest(client);
   } finally {
@@ -278,7 +282,10 @@ async function main() {
   await verifyLiveAdditiveSchema(
     env,
     releaseRoot,
-    !beforeManifest.protectedShape?.tables?.stock_units
+    {
+      phase2B: !beforeManifest.protectedShape?.tables?.stock_units,
+      phase3A: !beforeManifest.protectedShape?.tables?.inventory_movements,
+    }
   );
 
   const rollbackBranch = `rollback/pre-update-${Date.now()}`;

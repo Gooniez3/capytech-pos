@@ -19,9 +19,12 @@ import {
   MANIFEST_FORMAT_VERSION,
   OPTIONAL_PROTECTED_COLUMNS,
   PHASE2B_PROTECTED_COLUMNS,
+  PHASE3A_PROTECTED_SEQUENCES,
+  PHASE3A_PROTECTED_TABLE_COLUMNS,
   PROTECTED_SEQUENCES,
   PROTECTED_TABLE_COLUMNS,
   assertPhase2BMigrationInitialState,
+  assertPhase3AMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -242,6 +245,36 @@ test('Phase 2B migration rehearsal requires empty feature tables and untouched s
   );
 });
 
+test('Phase 3A contract protects the inventory ledger and requires an empty migration result', async () => {
+  assert.deepEqual(PHASE3A_PROTECTED_TABLE_COLUMNS.inventory_movements, [
+    'id', 'product_id', 'variant_id', 'movement_type', 'quantity_change',
+    'quantity_before', 'quantity_after', 'actor_user_id', 'reason',
+    'source_reference', 'occurred_at',
+  ]);
+  assert.deepEqual(PHASE3A_PROTECTED_SEQUENCES, {
+    inventory_movements: ['inventory_movements_id_seq'],
+  });
+  const makeClient = ({ count = '0', advanced = false } = {}) => ({
+    async query(sql, params = []) {
+      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('information_schema.columns')) {
+        return {
+          rows: PHASE3A_PROTECTED_TABLE_COLUMNS[params[0]]
+            .map((column_name) => ({ column_name })),
+        };
+      }
+      if (sql.includes('COUNT(*)::text')) return { rows: [{ count }] };
+      if (sql.includes('last_value::text')) {
+        return { rows: [{ last_value: advanced ? '2' : '1', is_called: advanced }] };
+      }
+      throw new Error(`Unexpected Phase 3A rehearsal query: ${sql}`);
+    },
+  });
+  await assert.doesNotReject(assertPhase3AMigrationInitialState(makeClient()));
+  await assert.rejects(assertPhase3AMigrationInitialState(makeClient({ count: '1' })), /unexpectedly populated/);
+  await assert.rejects(assertPhase3AMigrationInitialState(makeClient({ advanced: true })), /unexpectedly advanced/);
+});
+
 test('migration comparison fails closed for unexpected historical table changes', () => {
   const before = {
     formatVersion: 2,
@@ -346,7 +379,8 @@ test('new manifests automatically protect the complete installed Phase 2B schema
       if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
       if (sql.includes('information_schema.columns')) {
         const table = params[0];
-        const columns = ADDITIVE_PROTECTED_TABLE_COLUMNS[table]
+        const columns = PHASE3A_PROTECTED_TABLE_COLUMNS[table]
+          || ADDITIVE_PROTECTED_TABLE_COLUMNS[table]
           || [...PROTECTED_TABLE_COLUMNS[table], ...(OPTIONAL_PROTECTED_COLUMNS[table] || [])];
         return { rows: columns.map((column_name) => ({ column_name })) };
       }
@@ -370,6 +404,12 @@ test('new manifests automatically protect the complete installed Phase 2B schema
     assert.ok(manifest.protectedShape.sequences.includes(sequence));
     assert.deepEqual(manifest.sequences[sequence], { last_value: '1', is_called: false });
   }
+  assert.deepEqual(
+    manifest.protectedShape.tables.inventory_movements,
+    PHASE3A_PROTECTED_TABLE_COLUMNS.inventory_movements
+  );
+  assert.deepEqual(manifest.tables.inventory_movements, { count: '0', digest: 'empty' });
+  assert.ok(manifest.protectedShape.sequences.includes('inventory_movements_id_seq'));
 });
 
 test('dedicated updater cannot call destructive installation or preparation scripts', () => {
@@ -386,6 +426,8 @@ test('dedicated updater cannot call destructive installation or preparation scri
   assert.match(verifier, /comparisonManifest: expected/);
   assert.match(source, /assertPhase2BMigrationInitialState/);
   assert.match(verifier, /assertPhase2BMigrationInitialState/);
+  assert.match(source, /assertPhase3AMigrationInitialState/);
+  assert.match(verifier, /assertPhase3AMigrationInitialState/);
   assert.match(source, /Reviewed release tracks protected persisted paths/);
   assert.match(source, /HTTPS certificates changed during update/);
   assert.match(source, /Pre-existing backup changed during update/);

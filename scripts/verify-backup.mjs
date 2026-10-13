@@ -12,6 +12,7 @@ import {
 } from './lib/backup-safety.mjs';
 import {
   assertPhase2BMigrationInitialState,
+  assertPhase3AMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -215,6 +216,9 @@ async function main() {
         assertMigrationDataPreserved(expected, afterMigration);
         if (!expected.protectedShape?.tables?.stock_units) {
           await assertPhase2BMigrationInitialState(migratedClient);
+        }
+        if (!expected.protectedShape?.tables?.inventory_movements) {
+          await assertPhase3AMigrationInitialState(migratedClient);
         }
         await captureProductionDataManifest(migratedClient);
       } finally {

@@ -34,13 +34,19 @@ import {
   MIGRATION_NAME as P2B_MIGRATION_NAME, NEW_TABLES as P2B_NEW_TABLES,
   NEW_SEQUENCES as P2B_NEW_SEQUENCES,
 } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
+import {
+  up as p3aUp, down as p3aDown, UP_SQL as P3A_UP_SQL,
+  MIGRATION_NAME as P3A_MIGRATION_NAME, NEW_TABLES as P3A_NEW_TABLES,
+  NEW_SEQUENCES as P3A_NEW_SEQUENCES,
+} from '../migrations/1791849600000_p3a-inventory-movements.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
 const P08 = '1788652800003_p08-product-recycle-bin';
 const P10 = '1791676800000_p10-invoice-warranty';
 const P2B = '1791763200000_p2b-stock-unit-warranty-schema';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B];
+const P3A = '1791849600000_p3a-inventory-movements';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B, P3A];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -192,13 +198,38 @@ test('installed node-pg-migrate loads all migrations deterministically without e
     await migrations[5].up(builder);
     return builder.getSql();
   };
+  const buildP3A=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[6].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
   assert.equal(await buildP06(),await buildP06());
   assert.equal(await buildP08(),await buildP08());
   assert.equal(await buildP10(),await buildP10());
   assert.equal(await buildP2B(),await buildP2B());
+  assert.equal(await buildP3A(),await buildP3A());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('Phase 3A adds an empty immutable quantity ledger without rewriting history',()=>{
+  assert.equal(P3A_MIGRATION_NAME,P3A);
+  assert.deepEqual(P3A_NEW_TABLES,['inventory_movements']);
+  assert.deepEqual(P3A_NEW_SEQUENCES,['inventory_movements_id_seq']);
+  assert.doesNotMatch(P3A_UP_SQL,/^\s*(INSERT|UPDATE|DELETE|DROP|TRUNCATE|SETVAL|RESTART)\b/im);
+  assert.doesNotMatch(P3A_UP_SQL,/\binvoice_number_seq\b/i);
+  assert.match(P3A_UP_SQL,/quantity_after = quantity_before \+ quantity_change/);
+  assert.match(P3A_UP_SQL,/inventory_movements_direction_chk/);
+  assert.match(P3A_UP_SQL,/FOREIGN KEY \(product_id, variant_id\)/);
+  assert.match(P3A_UP_SQL,/inventory_movements_immutable_row_trg/);
+  assert.match(P3A_UP_SQL,/inventory_movements_immutable_truncate_trg/);
+  assert.throws(p3aDown,/intentionally blocked/);
+  const client=catalogClient(empty());
+  const builder=new MigrationBuilder(client,{},false,console);
+  p3aUp(builder);
+  assert.ok(builder.getSql().includes(P3A_UP_SQL));
+  assert.deepEqual(client.queries,[]);
 });
 
 test('Phase 2B is additive, forward-only, transactional, and preserves legacy storage',()=>{
