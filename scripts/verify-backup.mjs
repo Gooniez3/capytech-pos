@@ -13,6 +13,7 @@ import {
 import {
   assertPhase2BMigrationInitialState,
   assertPhase3AMigrationInitialState,
+  assertPhase3DMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -219,6 +220,9 @@ async function main() {
         }
         if (!expected.protectedShape?.tables?.inventory_movements) {
           await assertPhase3AMigrationInitialState(migratedClient);
+        }
+        if (!expected.protectedShape?.tables?.inventory_receipts) {
+          await assertPhase3DMigrationInitialState(migratedClient);
         }
         await captureProductionDataManifest(migratedClient);
       } finally {

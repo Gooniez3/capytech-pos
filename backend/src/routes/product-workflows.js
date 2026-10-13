@@ -4,6 +4,7 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 const uploadProductImageMiddleware = require('../middleware/productImageUpload');
 const { uploadProductImage, deleteProductImage, trashProductImage } = require('../services/productImageService');
 const { withTransaction } = require('../services/domain-transaction');
+const { restockProduct } = require('../services/product-restock-service');
 const {
   createProductWorkflow, editProductWorkflow, normalizeWorkflow,
 } = require('../services/product-workflow-service');
@@ -66,6 +67,16 @@ router.post('/workflow', requireAuth, requireAdmin, uploadProductImageMiddleware
   (req, res) => handle(req, res, false));
 router.put('/:id/workflow', requireAuth, requireAdmin, uploadProductImageMiddleware.single('image'),
   (req, res) => handle(req, res, true));
+router.post('/:id/restock', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await withTransaction(pool, (transaction) => restockProduct(transaction, {
+      actorUserId: req.user.id, productId: req.params.id, body: req.body,
+    }));
+    return res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    return sendError(res, error, 'Failed to restock product');
+  }
+});
 
 module.exports = router;
 module.exports.parseWorkflow = parseWorkflow;

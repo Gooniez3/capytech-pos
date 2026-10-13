@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus,
   Package,
@@ -10,6 +10,7 @@ import {
   RotateCcw,
   ChevronRight,
   ChevronDown,
+  PackagePlus,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/ui/PageHeader';
@@ -316,6 +317,16 @@ const [productVariants, setProductVariants] =
 const [loadingVariants, setLoadingVariants] =
   useState(false);  
 
+  const [restockProduct, setRestockProduct] = useState<ProductView | null>(null);
+  const [restockVariants, setRestockVariants] = useState<ApiVariant[]>([]);
+  const [restockVariantId, setRestockVariantId] = useState('');
+  const [restockQuantity, setRestockQuantity] = useState('');
+  const [restockSerials, setRestockSerials] = useState('');
+  const [restockReason, setRestockReason] = useState('');
+  const [restockSaving, setRestockSaving] = useState(false);
+  const [restockError, setRestockError] = useState<string | null>(null);
+  const restockAttempt = useRef<{ signature: string; key: string } | null>(null);
+
   useEffect(() => {
     loadData();
   }, []);
@@ -380,6 +391,83 @@ async function toggleProductVariants(
     setExpandedProductId(null);
   }
 }
+
+  async function openRestock(product: ProductView) {
+    setRestockProduct(product);
+    setRestockVariants([]);
+    setRestockVariantId('');
+    setRestockQuantity('');
+    setRestockSerials('');
+    setRestockReason('');
+    setRestockError(null);
+    restockAttempt.current = null;
+    if (!product.hasVariants) return;
+    try {
+      const data = await api.get<ApiVariant[]>(`/api/products/${product.id}/variants`);
+      setRestockVariants(data);
+      setRestockVariantId(data[0] ? String(data[0].id) : '');
+    } catch (error) {
+      setRestockError(error instanceof Error ? error.message : 'Failed to load variants.');
+    }
+  }
+
+  function closeRestock() {
+    if (restockSaving) return;
+    setRestockProduct(null);
+    restockAttempt.current = null;
+  }
+
+  async function submitRestock() {
+    if (!restockProduct || restockSaving) return;
+    const variant = restockVariants.find((item) => String(item.id) === restockVariantId);
+    if (restockProduct.hasVariants && !variant) {
+      setRestockError('Select a variant to restock.');
+      return;
+    }
+    const tracked = variant
+      ? variant.effective_serial_tracking_enabled === true
+      : restockProduct.serialTrackingEnabled;
+    const serialNumbers = restockSerials.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const normalized = serialNumbers.map((value) => value.replace(/[^A-Za-z0-9]/g, '').toUpperCase());
+    if (tracked && (!serialNumbers.length || normalized.some((value) => !value)
+      || new Set(normalized).size !== normalized.length)) {
+      setRestockError('Enter at least one valid, unique manufacturer serial number.');
+      return;
+    }
+    const quantity = Number(restockQuantity);
+    if (!tracked && (!Number.isSafeInteger(quantity) || quantity <= 0)) {
+      setRestockError('Quantity received must be a positive whole number.');
+      return;
+    }
+    const request = {
+      variant_id: variant ? Number(variant.id) : null,
+      quantity: tracked ? null : quantity,
+      serial_numbers: tracked ? serialNumbers : [],
+      reason: restockReason.trim() || null,
+    };
+    const signature = JSON.stringify({ productId: restockProduct.id, ...request,
+      serial_numbers: [...request.serial_numbers].map((value) => value.replace(/[^A-Za-z0-9]/g, '').toUpperCase()).sort() });
+    if (restockAttempt.current?.signature !== signature) {
+      restockAttempt.current = { signature, key: crypto.randomUUID() };
+    }
+    setRestockSaving(true);
+    setRestockError(null);
+    try {
+      const response = await api.post<{ receipt: { quantity_received: number }; replayed: boolean }>(
+        `/api/products/${restockProduct.id}/restock`,
+        { ...request, idempotency_key: restockAttempt.current.key }
+      );
+      toast(`${response.receipt.quantity_received} unit${response.receipt.quantity_received === 1 ? '' : 's'} received${response.replayed ? ' (previous submission confirmed)' : ''}.`, 'success');
+      setRestockProduct(null);
+      restockAttempt.current = null;
+      setProductVariants({});
+      await loadData();
+    } catch (error) {
+      setRestockError(error instanceof Error ? error.message : 'Restock failed. Review the entry before retrying.');
+    } finally {
+      setRestockSaving(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     return products.filter((product) => {
@@ -1280,6 +1368,18 @@ function printBarcodeLabel({
   printWindow.document.close();
 }
 
+  const selectedRestockVariant = restockVariants.find(
+    (variant) => String(variant.id) === restockVariantId
+  );
+  const restockTracked = selectedRestockVariant
+    ? selectedRestockVariant.effective_serial_tracking_enabled === true
+    : restockProduct?.serialTrackingEnabled === true;
+  const restockCurrentStock = Number(
+    selectedRestockVariant?.stock_quantity ?? restockProduct?.stock ?? 0
+  );
+  const restockSerialCount = restockSerials.split(/\r?\n/).filter((line) => line.trim()).length;
+  const restockReceived = restockTracked ? restockSerialCount : Number(restockQuantity || 0);
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -1787,7 +1887,7 @@ function printBarcodeLabel({
   {
     key: 'status',
     header: 'Status',
-    width: '130px',
+    width: '165px',
     render: (product) => (
       <div className="w-[130px]">
         <StockStatusBadge
@@ -1823,7 +1923,7 @@ function printBarcodeLabel({
     align: 'right',
     render: (product) => (
       <div className="
-        flex w-[130px]
+        flex w-[165px]
         items-center justify-end gap-1
       ">
         <button
@@ -1841,6 +1941,15 @@ function printBarcodeLabel({
           title="Edit product"
         >
           <Edit className="h-4 w-4" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => openRestock(product)}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
+          title="Restock product"
+        >
+          <PackagePlus className="h-4 w-4" />
         </button>
 
         <button
@@ -1883,6 +1992,88 @@ function printBarcodeLabel({
 />
 </div>
       )}
+
+
+      <Modal
+        open={!!restockProduct}
+        onClose={closeRestock}
+        title="Restock Product"
+        description={restockProduct ? `Receive inventory for ${restockProduct.name}.` : undefined}
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={closeRestock} disabled={restockSaving}>Cancel</Button>
+            <Button onClick={submitRestock} loading={restockSaving}>Receive Stock</Button>
+          </>
+        }
+      >
+        {restockProduct && (
+          <div className="space-y-4">
+            {restockProduct.hasVariants && (
+              <Select
+                label="Variant"
+                value={restockVariantId}
+                onChange={(event) => {
+                  setRestockVariantId(event.target.value);
+                  setRestockError(null);
+                  restockAttempt.current = null;
+                }}
+              >
+                <option value="">Select a variant</option>
+                {restockVariants.map((variant) => (
+                  <option key={variant.id} value={String(variant.id)}>
+                    {variant.name} — {variant.sku}
+                  </option>
+                ))}
+              </Select>
+            )}
+
+            <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-center">
+              <div><p className="text-xs text-slate-500">Current</p><p className="font-bold text-slate-900">{restockCurrentStock}</p></div>
+              <div><p className="text-xs text-slate-500">Receiving</p><p className="font-bold text-brand-700">{Number.isFinite(restockReceived) ? restockReceived : 0}</p></div>
+              <div><p className="text-xs text-slate-500">Projected</p><p className="font-bold text-emerald-700">{restockCurrentStock + (Number.isFinite(restockReceived) ? restockReceived : 0)}</p></div>
+            </div>
+
+            {restockTracked ? (
+              <label className="block text-sm font-medium text-slate-700">
+                Manufacturer serial numbers
+                <textarea
+                  autoFocus
+                  value={restockSerials}
+                  onChange={(event) => { setRestockSerials(event.target.value); setRestockError(null); }}
+                  rows={7}
+                  placeholder="Scan or enter one serial number per line"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+                />
+                <span className="mt-1 block text-xs font-normal text-slate-500">Quantity is derived from {restockSerialCount} unique serial entries.</span>
+              </label>
+            ) : (
+              <Input
+                autoFocus
+                label="Quantity received"
+                type="number"
+                min="1"
+                step="1"
+                value={restockQuantity}
+                onChange={(event) => { setRestockQuantity(event.target.value); setRestockError(null); }}
+                placeholder="1"
+              />
+            )}
+
+            <Input
+              label="Receiving reason (optional)"
+              value={restockReason}
+              onChange={(event) => { setRestockReason(event.target.value); setRestockError(null); }}
+              placeholder="Supplier delivery or purchase order"
+            />
+            {restockError && (
+              <p role="alert" className="rounded-lg border border-danger-200 bg-danger-50 px-3 py-2 text-sm text-danger-700">
+                {restockError}
+              </p>
+            )}
+          </div>
+        )}
+      </Modal>
 
 
       {/* Add / Edit Product */}

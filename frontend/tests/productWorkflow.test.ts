@@ -18,3 +18,12 @@ test('serialized opening stock and variant prices are present in the unified for
   assert.match(source, /price: variant\.price/);
   assert.match(source, /cost: variant\.cost/);
 });
+
+test('restock UI derives serialized quantity and reuses an idempotency key only for the same attempt', () => {
+  assert.match(source, /title="Restock product"/);
+  assert.match(source, /Quantity is derived from \{restockSerialCount\}/);
+  assert.match(source, /crypto\.randomUUID\(\)/);
+  assert.match(source, /restockAttempt\.current\?\.signature !== signature/);
+  assert.match(source, /idempotency_key: restockAttempt\.current\.key/);
+  assert.match(source, /Current Stock \(read-only\)/);
+});

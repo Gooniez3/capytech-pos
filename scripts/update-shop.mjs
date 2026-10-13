@@ -14,6 +14,7 @@ import {
 import {
   assertPhase2BMigrationInitialState,
   assertPhase3AMigrationInitialState,
+  assertPhase3DMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -146,6 +147,9 @@ async function verifyLiveAdditiveSchema(env, packageRoot, expectations) {
     }
     if (expectations.phase3A) {
       await assertPhase3AMigrationInitialState(client);
+    }
+    if (expectations.phase3D) {
+      await assertPhase3DMigrationInitialState(client);
     }
     await captureProductionDataManifest(client);
   } finally {
@@ -285,6 +289,7 @@ async function main() {
     {
       phase2B: !beforeManifest.protectedShape?.tables?.stock_units,
       phase3A: !beforeManifest.protectedShape?.tables?.inventory_movements,
+      phase3D: !beforeManifest.protectedShape?.tables?.inventory_receipts,
     }
   );
 

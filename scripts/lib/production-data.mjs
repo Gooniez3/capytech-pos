@@ -121,6 +121,14 @@ export const PHASE3A_PROTECTED_SEQUENCES = Object.freeze({
   inventory_movements: Object.freeze(['inventory_movements_id_seq']),
 });
 
+export const PHASE3D_PROTECTED_TABLE_COLUMNS = Object.freeze({
+  inventory_receipts: Object.freeze([
+    'idempotency_key', 'request_fingerprint', 'product_id', 'variant_id',
+    'actor_user_id', 'tracking_mode', 'quantity_received', 'quantity_before',
+    'quantity_after', 'reason', 'source_reference', 'stock_unit_ids', 'created_at',
+  ]),
+});
+
 export const PROTECTED_TABLES = Object.freeze(
   Object.keys(PROTECTED_TABLE_COLUMNS)
 );
@@ -274,6 +282,13 @@ async function currentProtectedShape(client) {
     tables[table] = [...columns];
     sequences.push(...tableSequences);
   }
+  for (const [table, columns] of Object.entries(PHASE3D_PROTECTED_TABLE_COLUMNS)) {
+    if (!(await relationExists(client, table))) continue;
+    const available = await tableColumnNames(client, table);
+    const missing = columns.filter((column) => !available.has(column));
+    if (missing.length) throw new Error(`Protected Phase 3D columns are missing from public.${table}: ${missing.join(', ')}`);
+    tables[table] = [...columns];
+  }
   return validateProtectedShape({
     tables,
     sequences,
@@ -309,6 +324,17 @@ export async function assertPhase3AMigrationInitialState(client) {
         throw new Error(`Phase 3A migration unexpectedly advanced public.${sequence}.`);
       }
     }
+  }
+}
+
+export async function assertPhase3DMigrationInitialState(client) {
+  for (const [table, columns] of Object.entries(PHASE3D_PROTECTED_TABLE_COLUMNS)) {
+    if (!(await relationExists(client, table))) throw new Error(`Phase 3D table is missing: public.${table}`);
+    const available = await tableColumnNames(client, table);
+    const missing = columns.filter((column) => !available.has(column));
+    if (missing.length) throw new Error(`Phase 3D columns are missing from public.${table}: ${missing.join(', ')}`);
+    const count = await client.query(`SELECT COUNT(*)::text AS count FROM public.${identifier(table)}`);
+    if (count.rows[0]?.count !== '0') throw new Error(`Phase 3D migration unexpectedly populated public.${table}.`);
   }
 }
 

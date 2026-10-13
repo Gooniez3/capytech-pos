@@ -21,10 +21,12 @@ import {
   PHASE2B_PROTECTED_COLUMNS,
   PHASE3A_PROTECTED_SEQUENCES,
   PHASE3A_PROTECTED_TABLE_COLUMNS,
+  PHASE3D_PROTECTED_TABLE_COLUMNS,
   PROTECTED_SEQUENCES,
   PROTECTED_TABLE_COLUMNS,
   assertPhase2BMigrationInitialState,
   assertPhase3AMigrationInitialState,
+  assertPhase3DMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -275,6 +277,22 @@ test('Phase 3A contract protects the inventory ledger and requires an empty migr
   await assert.rejects(assertPhase3AMigrationInitialState(makeClient({ advanced: true })), /unexpectedly advanced/);
 });
 
+test('Phase 3D contract protects durable restock receipts and requires an empty migration result', async () => {
+  assert.ok(PHASE3D_PROTECTED_TABLE_COLUMNS.inventory_receipts.includes('request_fingerprint'));
+  assert.ok(PHASE3D_PROTECTED_TABLE_COLUMNS.inventory_receipts.includes('stock_unit_ids'));
+  const client = {
+    async query(sql, params = []) {
+      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('information_schema.columns')) return {
+        rows: PHASE3D_PROTECTED_TABLE_COLUMNS[params[0]].map((column_name) => ({ column_name })),
+      };
+      if (sql.includes('COUNT(*)::text')) return { rows: [{ count: '0' }] };
+      throw new Error(`Unexpected Phase 3D rehearsal query: ${sql}`);
+    },
+  };
+  await assert.doesNotReject(assertPhase3DMigrationInitialState(client));
+});
+
 test('migration comparison fails closed for unexpected historical table changes', () => {
   const before = {
     formatVersion: 2,
@@ -379,7 +397,8 @@ test('new manifests automatically protect the complete installed Phase 2B schema
       if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
       if (sql.includes('information_schema.columns')) {
         const table = params[0];
-        const columns = PHASE3A_PROTECTED_TABLE_COLUMNS[table]
+        const columns = PHASE3D_PROTECTED_TABLE_COLUMNS[table]
+          || PHASE3A_PROTECTED_TABLE_COLUMNS[table]
           || ADDITIVE_PROTECTED_TABLE_COLUMNS[table]
           || [...PROTECTED_TABLE_COLUMNS[table], ...(OPTIONAL_PROTECTED_COLUMNS[table] || [])];
         return { rows: columns.map((column_name) => ({ column_name })) };
@@ -410,6 +429,10 @@ test('new manifests automatically protect the complete installed Phase 2B schema
   );
   assert.deepEqual(manifest.tables.inventory_movements, { count: '0', digest: 'empty' });
   assert.ok(manifest.protectedShape.sequences.includes('inventory_movements_id_seq'));
+  assert.deepEqual(
+    manifest.protectedShape.tables.inventory_receipts,
+    PHASE3D_PROTECTED_TABLE_COLUMNS.inventory_receipts
+  );
 });
 
 test('dedicated updater cannot call destructive installation or preparation scripts', () => {
@@ -428,6 +451,8 @@ test('dedicated updater cannot call destructive installation or preparation scri
   assert.match(verifier, /assertPhase2BMigrationInitialState/);
   assert.match(source, /assertPhase3AMigrationInitialState/);
   assert.match(verifier, /assertPhase3AMigrationInitialState/);
+  assert.match(source, /assertPhase3DMigrationInitialState/);
+  assert.match(verifier, /assertPhase3DMigrationInitialState/);
   assert.match(source, /Reviewed release tracks protected persisted paths/);
   assert.match(source, /HTTPS certificates changed during update/);
   assert.match(source, /Pre-existing backup changed during update/);
