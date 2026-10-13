@@ -4,7 +4,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentType,
 } from 'react';
 
 import {
@@ -333,7 +332,6 @@ export function POSPage() {
   lastScan,
   error: wirelessScannerError,
   createSession,
-  disconnectScanner,
 } = useWirelessScanner();
 
     const posDraftStorageKey = user?.id
@@ -468,22 +466,6 @@ const [
 const [
   newCustomerOpen,
   setNewCustomerOpen,
-] = useState(false);
-
-const [
-  newCustomer,
-  setNewCustomer,
-] = useState({
-  name: '',
-  phone: '',
-  email: '',
-  address: '',
-  notes: '',
-});
-
-const [
-  creatingCustomer,
-  setCreatingCustomer,
 ] = useState(false);
 
   /* -------------------------
@@ -1483,7 +1465,7 @@ const lookupBarcode = useCallback(
 
     try {
       const result =
-        await api.get<any>(
+        await api.get<ApiLookupResult>(
           `/api/products/lookup/${encodeURIComponent(
             code
           )}`
@@ -1668,7 +1650,7 @@ useEffect(() => {
     lastScan.code
   );
 }, [
-  lastScan?.id,
+  lastScan,
   lookupBarcode,
 ]);
 
@@ -1761,6 +1743,7 @@ useEffect(() => {
 }, [
   phoneScannerModalOpen,
   wirelessSessionId,
+  toast,
 ]);
 
   async function handleBarcodeSearch(
@@ -2287,6 +2270,19 @@ checkoutKeyRef.current = null;
     setSubmittingSale(false);
   }
 }
+
+type ApiLookupResult =
+  | (ApiSearchResult & {
+      type: 'variant';
+      variant_id: number | string;
+      variant_name: string;
+      variant_sku: string;
+    })
+  | (ApiSearchResult & {
+      type: 'product';
+      id: number | string;
+      has_variants?: boolean;
+    });
   
   /* =========================================================
      KEEP SEARCH FOCUSED
@@ -2361,9 +2357,10 @@ const scannedProductAvailable =
         <div className="space-y-1">
           {categories.map(
             (category) => {
-              const Icon =
-  (Icons as any)[category.icon] ??
-  Icons.Package;
+              const Icon = (
+                Icons[category.icon as keyof typeof Icons] ??
+                Icons.Package
+              ) as typeof Package;
 
               const active =
                 activeCategory ===
@@ -2780,7 +2777,6 @@ const scannedProductAvailable =
   cart={cart}
   subtotal={subtotal}
   discount={discount}
-  discountPercent={discountPercent}
   taxRate={taxRate}
   taxAmount={taxAmount}
   total={total}
@@ -2923,7 +2919,6 @@ const scannedProductAvailable =
               discount={
                 discount
               }
-              discountPercent={discountPercent}
               taxRate={taxRate}
               taxAmount={taxAmount}
               total={total}
@@ -4702,7 +4697,6 @@ interface CartPanelProps {
   cart: CartLine[];
   subtotal: number;
   discount: number;
-  discountPercent: number;
   taxRate: number;
   taxAmount: number;
   total: number;
@@ -4728,7 +4722,6 @@ function CartPanel({
   cart,
   subtotal,
   discount,
-  discountPercent,
   taxRate,
   taxAmount,
   total,

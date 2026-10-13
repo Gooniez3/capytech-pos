@@ -203,18 +203,6 @@ function makeSkuPart(value: string) {
     .replace(/^-+|-+$/g, '');
 }
 
-function makeProductSku(name: string) {
-  const cleaned = makeSkuPart(name);
-
-  if (!cleaned) return '';
-
-  return cleaned
-    .split('-')
-    .filter(Boolean)
-    .slice(0, 3)
-    .join('-');
-}
-
 function variantSuffix(value: string) {
   const normalized = value.trim().toLowerCase();
 

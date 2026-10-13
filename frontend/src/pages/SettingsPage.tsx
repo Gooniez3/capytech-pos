@@ -201,7 +201,7 @@ const [
   }
 
   loadStoreSettings();
-}, []);
+}, [toast]);
 
 
 /* =========================================================
@@ -234,7 +234,7 @@ useEffect(() => {
   }
 
   loadNotificationPreferences();
-}, []);
+}, [toast]);
 
 
 

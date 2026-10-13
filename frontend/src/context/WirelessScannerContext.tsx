@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -197,7 +198,7 @@ setLastScan({
     );
   }
 
-  function disconnectScanner() {
+  const disconnectScanner = useCallback(() => {
     const socket =
       socketRef.current;
 
@@ -216,7 +217,7 @@ setLastScan({
     setSessionId(null);
     setConnected(false);
     setLastScan(null);
-  }
+  }, [sessionId]);
 
   const value =
     useMemo<WirelessScannerContextValue>(
@@ -233,6 +234,7 @@ setLastScan({
         connected,
         lastScan,
         error,
+        disconnectScanner,
       ]
     );
 

@@ -115,7 +115,7 @@ export function Header({
       intervalId
     );
   };
-}, [user?.id]);
+}, [user]);
 
   /* =========================================================
      CLOSE DROPDOWN WHEN CLICKING OUTSIDE
