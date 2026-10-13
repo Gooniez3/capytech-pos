@@ -953,8 +953,8 @@ continue;
       snapshot.shopWarrantyMonths,
       snapshot.shopWarrantyStartDate,
       snapshot.shopWarrantyEndDate,
-      checkoutContractVersion === 2 ? item.product_sku : null,
-      checkoutContractVersion === 2 ? item.variant_sku : null,
+      item.product_sku,
+      item.variant_sku,
     ]
   );
       if (checkoutContractVersion === 2 && item.serial_tracking_enabled) {

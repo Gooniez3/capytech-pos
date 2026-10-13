@@ -99,6 +99,11 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
         INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
         VALUES ('P2E-CABLE', 'Cable', $1, 100, 40, 10) RETURNING id
       `, [category.id]);
+      const legacyProduct = await one(pool, `
+        INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
+        VALUES ('P2E-LEGACY', 'Legacy Checkout Test', $1, 200, 80, 5)
+        RETURNING id
+      `, [category.id]);
       const variantParent = await one(pool, `
         INSERT INTO products
           (sku, name, category_id, price, cost, stock_quantity, serial_tracking_enabled)
@@ -136,6 +141,29 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
           ],
         },
       });
+      const legacyCheckout = await invoke(salesRouter, '/', 'post', {
+        user: { id: cashier.id, role: 'cashier' },
+        body: {
+          idempotency_key: '123e4567-e89b-42d3-a456-426614174099',
+          payment_method: 'cash',
+          warranty_months: 1,
+          items: [
+            { product_id: legacyProduct.id, quantity: 1 },
+          ],
+        },
+      });
+      
+      assert.equal(legacyCheckout.statusCode, 201, JSON.stringify(legacyCheckout.body));
+      assert.equal(Number(legacyCheckout.body.sale.warranty_months), 1);
+      
+      const legacySavedItem = await one(pool, `
+        SELECT product_sku_snapshot, variant_sku_snapshot
+        FROM sale_items
+        WHERE sale_id = $1 AND product_id = $2
+      `, [legacyCheckout.body.sale.id, legacyProduct.id]);
+      
+      assert.equal(legacySavedItem.product_sku_snapshot, 'P2E-LEGACY');
+      assert.equal(legacySavedItem.variant_sku_snapshot, null);
 
       const key1 = '123e4567-e89b-42d3-a456-426614174001';
       const first = await checkout(key1, units[0].id, [
@@ -150,6 +178,7 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       const untrackedItem = first.body.items.find((item) => Number(item.product_id) === Number(untracked.id));
       assert.equal(untrackedItem.shop_warranty_eligible, false);
       assert.equal(untrackedItem.shop_warranty_months, null);
+      assert.equal(untrackedItem.product_sku_snapshot, 'P2E-CABLE');
       const expectedCoverage = warrantyCoverageDates(first.body.sale.purchase_date, 3);
       assert.equal(serializedItem.shop_warranty_start_date, expectedCoverage.startDate);
       assert.equal(serializedItem.shop_warranty_end_date, expectedCoverage.endDate);
