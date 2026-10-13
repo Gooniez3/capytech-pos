@@ -33,6 +33,7 @@ import type { Product, Category } from '@/types';
 interface ApiProduct {
   id: number | string;
   sku: string;
+  product_code: string;
   name: string;
   category_id: number | string | null;
   category_name?: string | null;
@@ -66,6 +67,7 @@ interface ProductImageStatus {
 interface ApiDeletedProduct {
   id: number | string;
   sku: string;
+  product_code?: string;
   name: string;
   category_name?: string | null;
   deleted_at?: string | null;
@@ -115,6 +117,7 @@ interface ApiVariant {
   product_id: number | string;
   name: string;
   sku: string;
+  product_code: string;
   price: number | string | null;
   cost: number | string | null;
   stock_quantity: number | string;
@@ -153,7 +156,7 @@ function mapProduct(product: ApiProduct): ProductView {
   return {
     id: String(product.id),
     name: product.name,
-    sku: product.sku,
+    sku: product.product_code || product.sku,
 
     categoryId:
       product.category_id !== null &&
@@ -169,7 +172,7 @@ function mapProduct(product: ApiProduct): ProductView {
       product.low_stock_threshold ?? 5
     ),
 
-    barcode: product.sku,
+    barcode: product.product_code || product.sku,
 
     categoryName:
       product.category_name ?? undefined,
@@ -195,50 +198,6 @@ function mapCategory(category: ApiCategory): Category {
     icon: '',
   };
 }
-function makeSkuPart(value: string) {
-  return value
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function variantSuffix(value: string) {
-  const normalized = value.trim().toLowerCase();
-
-  const known: Record<string, string> = {
-    black: 'BLK',
-    white: 'WHT',
-    pink: 'PNK',
-    midnight: 'MID',
-    blue: 'BLU',
-    red: 'RED',
-    green: 'GRN',
-    gray: 'GRY',
-    grey: 'GRY',
-    silver: 'SLV',
-    gold: 'GLD',
-    purple: 'PPL',
-    orange: 'ORG',
-    yellow: 'YLW',
-    brown: 'BRN',
-  };
-
-  return known[normalized] ?? makeSkuPart(value);
-}
-
-function makeVariantSku(
-  productSku: string,
-  variantName: string
-) {
-  const base = makeSkuPart(productSku);
-  const variant = variantSuffix(variantName);
-
-  if (!base || !variant) return '';
-
-  return `${base}-${variant}`;
-}
-
 export function ProductsPage() {
   const { toast } = useToast();
 
@@ -546,7 +505,7 @@ async function toggleProductVariants(
       if (!term) return true;
       return (
         product.name.toLowerCase().includes(term) ||
-        product.sku.toLowerCase().includes(term)
+        (product.product_code || product.sku).toLowerCase().includes(term)
       );
     });
   }, [deletedProducts, search]);
@@ -777,13 +736,6 @@ function updateVariant(
         [field]: value,
       };
 
-      if (field === 'name' && variant.isNew) {
-        updated.sku = makeVariantSku(
-          form.sku,
-          value
-        );
-      }
-
       return updated;
     })
   );
@@ -860,7 +812,7 @@ async function openEditProduct(
       data.map((variant) => ({
         id: String(variant.id),
         name: variant.name,
-        sku: variant.sku,
+        sku: variant.product_code || variant.sku,
 
         price:
           variant.price === null
@@ -936,11 +888,6 @@ async function openEditProduct(
     return;
   }
 
-  if (!form.sku.trim()) {
-    rejectForm('SKU is required.');
-    return;
-  }
-
   const price = Number(form.price);
   const cost = Number(form.cost || 0);
   const stock = Number(form.stock || 0);
@@ -964,11 +911,6 @@ async function openEditProduct(
 
     if (!variant.name.trim()) {
       rejectForm(`Variant ${i + 1}: name is required.`);
-      return;
-    }
-
-    if (!variant.sku.trim()) {
-      rejectForm(`Variant ${i + 1}: SKU is required.`);
       return;
     }
 
@@ -1004,17 +946,6 @@ async function openEditProduct(
       rejectForm(`Variant ${i + 1}: cost price is required and cannot be negative.`);
       return;
     }
-  }
-
-  // Make sure variant SKUs are unique in the form
-  const skuList = variants.map((variant) =>
-    variant.sku.trim().toUpperCase()
-  );
-
-  if (new Set(skuList).size !== skuList.length
-    || skuList.includes(form.sku.trim().toUpperCase())) {
-    rejectForm('Product and variant SKUs must all be unique.');
-    return;
   }
 
   if (!editingProduct) {
@@ -1064,7 +995,6 @@ async function openEditProduct(
     const productFormData = new FormData();
     productFormData.append('workflow', JSON.stringify({
       name: form.name.trim(),
-      sku: form.sku.trim().toUpperCase(),
       category_id: form.categoryId || null,
       price,
       cost,
@@ -1076,7 +1006,6 @@ async function openEditProduct(
       variants: variants.map((variant) => ({
         id: variant.id ? Number(variant.id) : null,
         name: variant.name.trim(),
-        sku: variant.sku.trim().toUpperCase(),
         price: variant.price.trim() === '' ? price : Number(variant.price),
         cost: variant.cost.trim() === '' ? cost : Number(variant.cost),
         opening_quantity: editingProduct ? 0 : Number(variant.stock || 0),
@@ -1087,16 +1016,14 @@ async function openEditProduct(
       })),
     }));
     if (selectedImage) productFormData.append('image', selectedImage);
-    if (editingProduct) {
-      await api.put(`/api/products/${editingProduct.id}/workflow`, productFormData);
-    } else {
-      await api.post('/api/products/workflow', productFormData);
-    }
+    const saved = editingProduct
+      ? await api.put<{ product: ApiProduct; variants: ApiVariant[] }>(`/api/products/${editingProduct.id}/workflow`, productFormData)
+      : await api.post<{ product: ApiProduct; variants: ApiVariant[] }>('/api/products/workflow', productFormData);
 
     toast(
       editingProduct
         ? 'Product updated successfully.'
-        : 'Product added successfully.',
+        : `Product added successfully: ${saved.product.product_code}`,
       'success'
     );
 
@@ -1185,6 +1112,7 @@ async function openVariantBarcode(
       product_name: string;
       variant_name: string;
       sku: string;
+      product_code: string;
       price: number | string;
       barcode: string;
     }>(
@@ -1194,7 +1122,7 @@ async function openVariantBarcode(
     setVariantBarcode({
       productName: data.product_name,
       variantName: data.variant_name,
-      sku: data.sku,
+      sku: data.product_code || data.sku,
       price: Number(data.price ?? product.price),
       barcode: data.barcode,
     });
@@ -1468,7 +1396,7 @@ function printBarcodeLabel({
             onChange={(e) =>
               setSearch(e.target.value)
             }
-            placeholder="Search by name or SKU..."
+            placeholder="Search by name or product code..."
             className="w-full h-10 rounded-lg border border-slate-300 bg-white pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 transition-colors"
           />
         </div>
@@ -1598,11 +1526,11 @@ function printBarcodeLabel({
               },
               {
                 key: 'sku',
-                header: 'SKU',
+                header: 'Product Code',
                 width: '180px',
                 render: (product) => (
                   <span className="font-mono text-sm text-slate-600">
-                    {product.sku}
+                    {product.product_code || product.sku}
                   </span>
                 ),
               },
@@ -1938,7 +1866,7 @@ function printBarcodeLabel({
 
   {
     key: 'sku',
-    header: 'SKU Code',
+    header: 'Product Code',
     width: '150px',
     render: (product) => (
       <div className="w-[150px]">
@@ -2287,15 +2215,12 @@ function printBarcodeLabel({
             placeholder="e.g. Logitech MX Keys"
           />
 
-          <Input
-            label="SKU / Scan Code"
-            name="sku"
-            value={form.sku}
-            onChange={(e) =>
-  updateForm('sku', e.target.value)
-}
-            placeholder="e.g. KB-LGX-001"
-          />
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Product Code</p>
+            <p className="mt-1 font-mono text-sm font-bold text-slate-800">
+              {editingProduct ? editingProduct.sku : 'Automatically generated on save'}
+            </p>
+          </div>
 
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -2423,7 +2348,7 @@ function printBarcodeLabel({
       </label>
 
       <p className="text-xs text-slate-400 mt-1">
-        Optional — each variant has its own SKU, selling price, cost price, and stock.
+        Optional — each variant receives its own product code, selling price, cost price, and stock.
       </p>
     </div>
 
@@ -2494,18 +2419,9 @@ function printBarcodeLabel({
             </button>
           </div>
 
-          <input
-            value={variant.sku}
-            onChange={(e) =>
-              updateVariant(
-                index,
-                'sku',
-                e.target.value
-              )
-            }
-            placeholder="Variant SKU"
-            className="mt-2 h-8 w-full rounded-md border border-slate-300 bg-white px-2 font-mono text-xs text-slate-600 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
-          />
+          <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-mono text-xs text-slate-600">
+            {variant.id ? variant.sku : 'Product code generated on save'}
+          </div>
           <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <input
               type="number"
@@ -2578,9 +2494,8 @@ function printBarcodeLabel({
           </p>
 
           <p className="mt-1 text-xs text-brand-700">
-            The product SKU is used as its barcode value.
-             A Code 128 barcode can be generated and printed
-            for scanning at the POS.
+            CapyTech generates the product code automatically. Ordinary products use this CP code at POS;
+            serialized products require an individual CT label from Stock Units.
           
           </p>
         </div>

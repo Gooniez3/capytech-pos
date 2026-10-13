@@ -113,3 +113,68 @@ If a migration transaction fails, PostgreSQL rolls it back and the updater stops
 Restoring the production database from backup is a disaster-recovery action, not a normal application rollback. It can erase transactions created after the backup. Never restore over the live database while it exists. A separately approved recovery procedure must restore into a new database first, verify it, stop all writers, preserve the failed database under a different name, and explicitly reconcile any post-backup transactions.
 
 If any new sales occurred after the update, do not switch versions or restore a database until those transactions have been reconciled and a new verified backup has been made.
+# FIX-01 physical-unit barcode migration
+
+The FIX-01 migration adds a permanent `CT000001`-style barcode identity to every
+serialized stock unit. It does not replace product SKUs, variant SKUs,
+manufacturer serial numbers, internal `SU-` identities, sale assignments, or
+invoice snapshots.
+
+Before approving this migration for a restored production rehearsal, run a
+read-only preflight for reserved-namespace collisions in all products (including
+inactive rows), variants, and stock units:
+
+```sql
+SELECT 'product' AS source, id, sku AS value FROM products
+ WHERE UPPER(BTRIM(sku)) ~ '^CT[0-9]{6,}$'
+UNION ALL
+SELECT 'variant', id, sku FROM product_variants
+ WHERE UPPER(BTRIM(sku)) ~ '^CT[0-9]{6,}$'
+UNION ALL
+SELECT 'manufacturer_serial', id, manufacturer_serial_number FROM stock_units
+ WHERE normalized_serial_number ~ '^CT[0-9]{6,}$';
+```
+
+Any returned row is a release blocker. Do not rename or silently reassign that
+identifier; stop and review the namespace choice. The migration repeats this
+check inside its transaction and fails before creating the sequence, column, or
+backfill if a collision exists.
+
+On a verified restored test database, confirm before and after counts for
+`stock_units`, `stock_unit_events`, and `sale_item_stock_units`; confirm all old
+stock-unit columns and inventory quantities have identical protected digests;
+and confirm every stock unit—including sold, quarantined, and retired rows—has
+one distinct code matching `^CT[0-9]{6,}$`. Newly received units obtain their
+code from `stock_unit_code_seq`. Retired rows are never deleted, so their codes
+remain reserved permanently.
+
+Rollback is by restoring the verified pre-upgrade backup. The migration has no
+down migration and sequences must never be rewound. Historical invoices remain
+unchanged because FIX-01 does not add or populate sale-item barcode snapshots.
+# CP product-code migration (Phase B)
+
+The CP migration is additive: it preserves every existing product and variant SKU and assigns a separate permanent `CP000001`-style catalog identity. It also creates the globally unique `catalog_codes` ownership registry and `catalog_code_seq`. Existing CT codes, internal SU identities, manufacturer serials, stock, images, sales, invoices, refunds, and warranty snapshots are not rewritten.
+
+Before upgrading, complete the normal verified backup and isolated restore rehearsal in this guide. On the restored copy, run this read-only namespace preflight before migrations:
+
+```sql
+SELECT 'product SKU' AS source, sku AS value FROM products WHERE upper(btrim(sku)) ~ '^CP[0-9]{6,}$'
+UNION ALL SELECT 'variant SKU', sku FROM product_variants WHERE upper(btrim(sku)) ~ '^CP[0-9]{6,}$'
+UNION ALL SELECT 'manufacturer serial', manufacturer_serial_number FROM stock_units WHERE normalized_serial_number ~ '^CP[0-9]{6,}$'
+UNION ALL SELECT 'stock unit internal SKU', internal_sku FROM stock_units WHERE upper(btrim(internal_sku)) ~ '^CP[0-9]{6,}$'
+UNION ALL SELECT 'stock unit code', unit_code FROM stock_units WHERE upper(btrim(unit_code)) ~ '^CP[0-9]{6,}$';
+```
+
+The result must be empty. A collision is a hard stop: do not rename production identifiers automatically. After the restored rehearsal, verify:
+
+- every product and variant has exactly one registry-owned CP code;
+- `COUNT(*)` for products, variants, stock units, inventory movements, sales, sale items, refunds, customers, and users is unchanged;
+- legacy SKUs, CT codes, SU identifiers, manufacturer serials, stock quantities, invoice numbers, warranty values, and image references match the pre-migration protected-data manifest;
+- `catalog_code_seq` is not reset or rewound;
+- ordinary CP and serialized CT labels render in Chrome print preview without scaling or clipping.
+
+Deploy in this order: verified backup, isolated restoration, collision preflight, migration rehearsal, stop the application, apply the migration, install the matching backend and frontend, then restart for controlled smoke checks. The application release and migration must be treated as a coordinated upgrade because the new application reads `product_code`; never start the new backend against the pre-CP schema.
+
+CP and CT identities are permanent. There is intentionally no destructive down migration. If acceptance fails after CP-dependent writes or labels have been issued, stop the application and restore the verified database, product-image storage, configuration, and certificates as one matching backup set. Do not remove columns, delete registry rows, or rewind either barcode sequence.
+
+Physical acceptance remains mandatory: print representative product, variant, and unit labels and scan each with the shop USB scanner, built-in camera, and wireless phone under typical lighting and at the actual label sizes.

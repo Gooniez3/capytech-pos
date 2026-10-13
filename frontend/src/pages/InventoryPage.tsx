@@ -37,6 +37,7 @@ interface ApiProduct {
   id: number | string;
 
   sku: string;
+  product_code: string;
   name: string;
 
   category_id:
@@ -179,7 +180,7 @@ export function InventoryPage() {
               item.name,
 
             sku:
-              item.sku,
+              item.product_code || item.sku,
 
             categoryId:
               item.category_id !==
@@ -218,7 +219,7 @@ export function InventoryPage() {
               ),
 
             barcode:
-              item.sku,
+              item.product_code || item.sku,
 
             image: '',
 

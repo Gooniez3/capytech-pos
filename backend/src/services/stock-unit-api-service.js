@@ -57,7 +57,8 @@ async function listStockUnits(queryable, query) {
       ? ''
       : `OR su.normalized_serial_number = ${add(normalizedSearch)}`;
     clauses.push(`(
-      su.internal_sku ILIKE ${parameter}
+      su.unit_code ILIKE ${parameter}
+      OR su.internal_sku ILIKE ${parameter}
       OR su.manufacturer_serial_number ILIKE ${parameter}
       ${normalizedClause}
       OR p.name ILIKE ${parameter}
@@ -79,11 +80,24 @@ async function listStockUnits(queryable, query) {
   const offsetParameter = add(filters.offset);
   const rows = await queryable.query(
     `
-      SELECT su.id, su.internal_sku, su.manufacturer_serial_number,
+      SELECT su.id, su.internal_sku, su.unit_code, su.manufacturer_serial_number,
              su.normalized_serial_number, su.product_id, su.variant_id,
              su.state, su.received_at, su.created_at, su.updated_at,
-             p.name AS product_name, p.sku AS product_sku,
-             pv.name AS variant_name, pv.sku AS variant_sku
+             p.name AS product_name, p.sku AS product_sku, p.product_code,
+             p.price AS product_price, pv.name AS variant_name, pv.sku AS variant_sku,
+             pv.product_code AS variant_product_code, pv.price AS variant_price,
+             COALESCE(pv.price, p.price) AS effective_price,
+             COALESCE(pv.stock_quantity, p.stock_quantity) AS effective_stock_quantity,
+             COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+               AS effective_serial_tracking_enabled,
+             COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+               AS effective_shop_warranty_enabled,
+             CASE
+               WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled) = TRUE
+               THEN CASE WHEN pv.shop_warranty_enabled IS NULL
+                 THEN p.shop_warranty_months ELSE pv.shop_warranty_months END
+               ELSE NULL
+             END AS effective_shop_warranty_months
       FROM stock_units su
       JOIN products p ON p.id = su.product_id
       LEFT JOIN product_variants pv ON pv.id = su.variant_id
@@ -109,8 +123,21 @@ async function stockUnitDetails(queryable, unitId) {
   const id = positiveInteger(unitId, 'stock unit id');
   const unitResult = await queryable.query(
     `
-      SELECT su.*, p.name AS product_name, p.sku AS product_sku,
-             pv.name AS variant_name, pv.sku AS variant_sku,
+      SELECT su.*, p.name AS product_name, p.sku AS product_sku, p.product_code,
+             p.price AS product_price, pv.name AS variant_name, pv.sku AS variant_sku,
+             pv.product_code AS variant_product_code, pv.price AS variant_price,
+             COALESCE(pv.price, p.price) AS effective_price,
+             COALESCE(pv.stock_quantity, p.stock_quantity) AS effective_stock_quantity,
+             COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
+               AS effective_serial_tracking_enabled,
+             COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled)
+               AS effective_shop_warranty_enabled,
+             CASE
+               WHEN COALESCE(pv.shop_warranty_enabled, p.shop_warranty_enabled) = TRUE
+               THEN CASE WHEN pv.shop_warranty_enabled IS NULL
+                 THEN p.shop_warranty_months ELSE pv.shop_warranty_months END
+               ELSE NULL
+             END AS effective_shop_warranty_months,
              sis.id AS active_assignment_id, sis.sale_item_id,
              sis.internal_sku_snapshot, sis.manufacturer_serial_number_snapshot,
              s.id AS sale_id, s.invoice_number, s.status AS sale_status
@@ -151,10 +178,12 @@ async function lookupStockUnit(queryable, code) {
   const result = await queryable.query(
     `
       SELECT id,
-             CASE WHEN UPPER(internal_sku) = UPPER($1) THEN 'internal_sku'
+             CASE WHEN UPPER(unit_code) = UPPER($1) THEN 'unit_code'
+                  WHEN UPPER(internal_sku) = UPPER($1) THEN 'internal_sku'
                   ELSE 'manufacturer_serial' END AS matched_by
       FROM stock_units
-      WHERE UPPER(internal_sku) = UPPER($1)
+      WHERE UPPER(unit_code) = UPPER($1)
+         OR UPPER(internal_sku) = UPPER($1)
          OR normalized_serial_number = $2
       ORDER BY id
     `,

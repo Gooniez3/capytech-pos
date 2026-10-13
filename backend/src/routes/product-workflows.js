@@ -37,7 +37,7 @@ async function handle(req, res, edit) {
   try {
     const workflow = parseWorkflow(req);
     const validated = normalizeWorkflow(workflow, { edit });
-    if (req.file) uploaded = await uploadProductImage(req.file, validated.productSku);
+    if (req.file) uploaded = await uploadProductImage(req.file, validated.name);
     const result = await withTransaction(pool, (transaction) => edit
       ? editProductWorkflow(transaction, {
         actorUserId: req.user.id, productId: req.params.id, workflow,

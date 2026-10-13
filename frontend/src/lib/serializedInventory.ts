@@ -17,14 +17,28 @@ export interface InventoryPolicy {
 export interface StockUnitSummary {
   id: number | string;
   internal_sku: string;
+  unit_code: string;
   manufacturer_serial_number: string;
   product_id: number | string;
   variant_id: number | string | null;
   product_name: string;
   product_sku: string;
+  product_code?: string;
   variant_name: string | null;
   variant_sku: string | null;
+  variant_product_code?: string | null;
+  effective_price?: number | string;
+  effective_stock_quantity?: number | string;
+  effective_serial_tracking_enabled?: boolean;
+  effective_shop_warranty_enabled?: boolean;
+  effective_shop_warranty_months?: WarrantyDuration | null;
   state: StockUnitState;
+}
+
+export const UNIT_CODE_PATTERN = /^CT\d{6,}$/i;
+
+export function isUnitBarcode(value: string): boolean {
+  return UNIT_CODE_PATTERN.test(value.trim());
 }
 
 export function serialLines(value: string): string[] {

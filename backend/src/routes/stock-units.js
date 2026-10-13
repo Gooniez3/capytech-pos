@@ -3,6 +3,7 @@ const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { revalidateCurrentAdmin } = require('../services/sale-reversal');
 const { withTransaction } = require('../services/domain-transaction');
+const { generateBarcodeDataUrl } = require('../services/barcode-service');
 const {
   adoptExistingInventory,
   registerReceivedUnits,
@@ -99,6 +100,26 @@ router.get('/lookup', requireAuth, async (req, res) => {
     return res.json(await lookupStockUnit(pool, query.code));
   } catch (error) {
     return sendError(res, error, 'Failed to look up stock unit');
+  }
+});
+
+router.get('/:id/barcode', requireAuth, async (req, res) => {
+  try {
+    const unit = await stockUnitDetails(pool, req.params.id);
+    return res.json({
+      id: unit.id,
+      unit_code: unit.unit_code,
+      internal_sku: unit.internal_sku,
+      manufacturer_serial_number: unit.manufacturer_serial_number,
+      product_name: unit.product_name,
+      product_sku: unit.product_sku,
+      variant_name: unit.variant_name,
+      variant_sku: unit.variant_sku,
+      price: unit.effective_price,
+      barcode: await generateBarcodeDataUrl(unit.unit_code),
+    });
+  } catch (error) {
+    return sendError(res, error, 'Failed to generate stock-unit barcode');
   }
 });
 

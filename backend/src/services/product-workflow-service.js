@@ -4,6 +4,7 @@ const { applyQuantityMovements } = require('./quantity-inventory-service');
 const { registerReceivedUnits } = require('./stock-unit-service');
 const { updateInventoryPolicy } = require('./inventory-policy-service');
 const { prepareUniqueSerialBatch } = require('./serial-number');
+const { allocateCatalogCode, rejectClientCatalogCode } = require('./catalog-code-service');
 
 class ProductWorkflowError extends Error {
   constructor(message, statusCode = 400, code = 'INVALID_PRODUCT_WORKFLOW') {
@@ -77,11 +78,12 @@ function normalizeWorkflow(raw, { edit = false } = {}) {
   const allowed = new Set([
     'name', 'sku', 'category_id', 'price', 'cost', 'opening_quantity',
     'low_stock_threshold', 'serial_tracking_enabled', 'serial_numbers',
-    'variants', 'removed_variant_ids',
+    'variants', 'removed_variant_ids', 'product_code',
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) throw new ProductWorkflowError(`Unknown workflow field: ${key}`);
   }
+  rejectClientCatalogCode(raw.product_code);
   const productSerial = serialSetting(raw.serial_tracking_enabled ?? false);
   const variants = Array.isArray(raw.variants) ? raw.variants : [];
   const normalizedVariants = variants.map((entry, index) => {
@@ -90,18 +92,19 @@ function normalizeWorkflow(raw, { edit = false } = {}) {
     }
     const variantAllowed = new Set([
       'id', 'name', 'sku', 'price', 'cost', 'opening_quantity',
-      'low_stock_threshold', 'serial_tracking_enabled', 'serial_numbers',
+      'low_stock_threshold', 'serial_tracking_enabled', 'serial_numbers', 'product_code',
     ]);
     for (const key of Object.keys(entry)) {
       if (!variantAllowed.has(key)) throw new ProductWorkflowError(`Unknown variant field: ${key}`);
     }
+    rejectClientCatalogCode(entry.product_code);
     const setting = serialSetting(entry.serial_tracking_enabled, { variant: true });
     const tracked = setting ?? productSerial;
     const openingQuantity = edit ? 0 : nonnegativeInteger(entry.opening_quantity, `Variant ${index + 1} opening quantity`);
     return {
       id: edit ? nullableId(entry.id, `Variant ${index + 1} id`) : null,
       name: requiredText(entry.name, `Variant ${index + 1} name`),
-      sku: sku(entry.sku, `Variant ${index + 1} SKU`),
+      legacySku: entry.sku === undefined || entry.sku === '' ? null : sku(entry.sku, `Variant ${index + 1} SKU`),
       price: money(entry.price, `Variant ${index + 1} selling price`, { positive: true }),
       cost: money(entry.cost ?? 0, `Variant ${index + 1} cost price`),
       lowStockThreshold: nonnegativeInteger(entry.low_stock_threshold ?? 2, `Variant ${index + 1} reorder level`),
@@ -110,12 +113,10 @@ function normalizeWorkflow(raw, { edit = false } = {}) {
       serialNumbers: edit ? [] : normalizeSerials(entry.serial_numbers, openingQuantity, `Variant ${index + 1}`, tracked),
     };
   });
-  const productSku = sku(raw.sku, 'Product SKU');
-  const allSkus = [productSku, ...normalizedVariants.map((variant) => variant.sku)];
-  if (new Set(allSkus).size !== allSkus.length) throw new ProductWorkflowError('Product and variant SKUs must be unique');
+  const productSku = raw.sku === undefined || raw.sku === '' ? null : sku(raw.sku, 'Product SKU');
   const openingQuantity = edit || normalizedVariants.length ? 0 : nonnegativeInteger(raw.opening_quantity, 'Opening quantity');
   return {
-    name: requiredText(raw.name, 'Product name'), productSku,
+    name: requiredText(raw.name, 'Product name'), legacySku: productSku,
     categoryId: nullableId(raw.category_id, 'Category'),
     price: money(raw.price, 'Selling price', { positive: true }),
     cost: money(raw.cost ?? 0, 'Cost price'),
@@ -150,21 +151,25 @@ async function createProductWorkflowOperation(transaction, input) {
   const client = transactionClient(transaction);
   const workflow = normalizeWorkflow(input.workflow);
   await revalidateCurrentAdmin(client, input.actorUserId);
-  await assertSkusAvailable(client, [workflow.productSku, ...workflow.variants.map((item) => item.sku)]);
+  const productCode = await allocateCatalogCode(client);
+  const variantCodes = [];
+  for (let index = 0; index < workflow.variants.length; index += 1) variantCodes.push(await allocateCatalogCode(client));
+  await assertSkusAvailable(client, [productCode, ...variantCodes]);
   const productResult = await client.query(`
     INSERT INTO products
-      (sku,name,category_id,price,cost,stock_quantity,low_stock_threshold,image_url,image_path,serial_tracking_enabled)
-    VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8,$9) RETURNING *
-  `, [workflow.productSku, workflow.name, workflow.categoryId, workflow.price, workflow.cost,
+      (sku,product_code,name,category_id,price,cost,stock_quantity,low_stock_threshold,image_url,image_path,serial_tracking_enabled)
+    VALUES ($1,$1,$2,$3,$4,$5,0,$6,$7,$8,$9) RETURNING *
+  `, [productCode, workflow.name, workflow.categoryId, workflow.price, workflow.cost,
     workflow.lowStockThreshold, input.imageUrl || null, input.imagePath || null, workflow.serialTrackingEnabled]);
   const product = productResult.rows[0];
   const variants = [];
-  for (const item of workflow.variants) {
+  for (const [index, item] of workflow.variants.entries()) {
+    const variantCode = variantCodes[index];
     const result = await client.query(`
       INSERT INTO product_variants
-        (product_id,name,sku,price,cost,stock_quantity,low_stock_threshold,serial_tracking_enabled)
-      VALUES ($1,$2,$3,$4,$5,0,$6,$7) RETURNING *
-    `, [product.id, item.name, item.sku, item.price, item.cost, item.lowStockThreshold, item.serialTrackingEnabled]);
+        (product_id,name,sku,product_code,price,cost,stock_quantity,low_stock_threshold,serial_tracking_enabled)
+      VALUES ($1,$2,$3,$3,$4,$5,0,$6,$7) RETURNING *
+    `, [product.id, item.name, variantCode, item.price, item.cost, item.lowStockThreshold, item.serialTrackingEnabled]);
     variants.push({ row: result.rows[0], input: item });
   }
   const targets = variants.length
@@ -208,28 +213,27 @@ async function editProductWorkflowOperation(transaction, input) {
       throw new ProductWorkflowError('A variant with stock, sales, stock units, or warranty snapshots cannot be removed', 409, 'VARIANT_REFERENCED');
     }
   }
-  await assertSkusAvailable(client, [workflow.productSku, ...workflow.variants.map((item) => item.sku)], {
-    productId: Number(product.id), variantIds: retainedIds,
-  });
   const updatedProduct = (await client.query(`
-    UPDATE products SET sku=$1,name=$2,category_id=$3,price=$4,cost=$5,low_stock_threshold=$6,
-      image_url=COALESCE($7,image_url),image_path=COALESCE($8,image_path),updated_at=NOW()
-    WHERE id=$9 RETURNING *
-  `, [workflow.productSku, workflow.name, workflow.categoryId, workflow.price, workflow.cost,
+    UPDATE products SET name=$1,category_id=$2,price=$3,cost=$4,low_stock_threshold=$5,
+      image_url=COALESCE($6,image_url),image_path=COALESCE($7,image_path),updated_at=NOW()
+    WHERE id=$8 RETURNING *
+  `, [workflow.name, workflow.categoryId, workflow.price, workflow.cost,
     workflow.lowStockThreshold, input.imageUrl, input.imagePath, product.id])).rows[0];
   const outputVariants = [];
   for (const item of workflow.variants) {
     if (item.id === null) {
+      const variantCode = await allocateCatalogCode(client);
+      await assertSkusAvailable(client, [variantCode]);
       const row = (await client.query(`
-        INSERT INTO product_variants(product_id,name,sku,price,cost,stock_quantity,low_stock_threshold,serial_tracking_enabled)
-        VALUES($1,$2,$3,$4,$5,0,$6,$7) RETURNING *
-      `, [product.id, item.name, item.sku, item.price, item.cost, item.lowStockThreshold, item.serialTrackingEnabled])).rows[0];
+        INSERT INTO product_variants(product_id,name,sku,product_code,price,cost,stock_quantity,low_stock_threshold,serial_tracking_enabled)
+        VALUES($1,$2,$3,$3,$4,$5,0,$6,$7) RETURNING *
+      `, [product.id, item.name, variantCode, item.price, item.cost, item.lowStockThreshold, item.serialTrackingEnabled])).rows[0];
       outputVariants.push(row);
     } else {
       const row = (await client.query(`
-        UPDATE product_variants SET name=$1,sku=$2,price=$3,cost=$4,low_stock_threshold=$5,updated_at=NOW()
-        WHERE id=$6 AND product_id=$7 RETURNING *
-      `, [item.name, item.sku, item.price, item.cost, item.lowStockThreshold, item.id, product.id])).rows[0];
+        UPDATE product_variants SET name=$1,price=$2,cost=$3,low_stock_threshold=$4,updated_at=NOW()
+        WHERE id=$5 AND product_id=$6 RETURNING *
+      `, [item.name, item.price, item.cost, item.lowStockThreshold, item.id, product.id])).rows[0];
       outputVariants.push(row);
     }
   }

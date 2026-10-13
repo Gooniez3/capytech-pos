@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Archive, RefreshCw, Search, ShieldCheck } from 'lucide-react';
+import { Archive, Barcode, RefreshCw, Search, ShieldCheck } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/context/ToastContext';
@@ -173,8 +173,30 @@ export function StockUnitsPage() {
     catch (error) { toast(error instanceof Error ? error.message : 'Failed to load unit.', 'error'); }
   }
 
+  async function printUnitBarcode(unit: StockUnitSummary) {
+    try {
+      const label = await api.get<{
+        unit_code: string; product_name: string; variant_name: string | null;
+        manufacturer_serial_number: string; barcode: string;
+      }>(`/api/stock-units/${unit.id}/barcode`);
+      const popup = window.open('', '_blank', 'width=480,height=420');
+      if (!popup) throw new Error('Allow pop-ups to print the stock-unit label.');
+      const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
+      }[character] || character));
+      popup.document.write(`<!doctype html><html><head><title>${escape(label.unit_code)}</title><style>
+        @page{size:50mm 30mm;margin:0}html,body{margin:0;width:50mm;height:30mm;font-family:Arial,sans-serif}
+        .label{box-sizing:border-box;width:50mm;height:30mm;padding:2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+        img{width:42mm;height:12mm;object-fit:contain}.code{font:700 8pt monospace}.name,.serial{max-width:46mm;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:7pt}.name{font-weight:700}
+      </style></head><body><div class="label"><img id="barcode" src="${label.barcode}" alt="${escape(label.unit_code)}"><div class="code">${escape(label.unit_code)}</div><div class="name">${escape(label.product_name)}${label.variant_name ? ` - ${escape(label.variant_name)}` : ''}</div><div class="serial">SN: ${escape(label.manufacturer_serial_number)}</div></div><script>const image=document.getElementById('barcode');const print=()=>setTimeout(()=>window.print(),100);image.complete?print():image.onload=print;</script></body></html>`);
+      popup.document.close();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Failed to print unit barcode.', 'error');
+    }
+  }
+
   async function lifecycle(action: 'release' | 'retire') {
-    if (!selected || !admin || !window.confirm(`${action === 'retire' ? 'Retire' : 'Release'} ${selected.internal_sku}?`)) return;
+    if (!selected || !admin || !window.confirm(`${action === 'retire' ? 'Retire' : 'Release'} ${selected.unit_code}?`)) return;
     setBusy(true);
     try {
       await api.post(`/api/stock-units/${action}`, { unit_ids: [selected.id], reason: reason.trim() || null });
@@ -185,7 +207,7 @@ export function StockUnitsPage() {
 
   async function correctSerial() {
     if (!selected || !admin || !correctedSerial.trim()) return;
-    if (!window.confirm(`Retire ${selected.internal_sku} and create a replacement with a new internal SU- identity and serial “${correctedSerial.trim()}”? The old serial remains reserved.`)) return;
+    if (!window.confirm(`Retire ${selected.unit_code} and create a replacement with a new permanent CT identity and serial “${correctedSerial.trim()}”? The old serial and CT code remain reserved.`)) return;
     setBusy(true);
     try {
       await api.patch(`/api/stock-units/${selected.id}/serial`, { serial_number: correctedSerial.trim(), reason: reason.trim() || 'serial correction' });
@@ -215,19 +237,19 @@ export function StockUnitsPage() {
     </Card>}
 
     <Card><div className="flex flex-col gap-3 md:flex-row md:items-center">
-      <div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Search serial, SU- code, product, or variant" /></div>
+      <div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Search CT code, serial, product, or variant" /></div>
       <select className="h-10 rounded-lg border border-slate-200 px-3" value={state} onChange={(e) => { setState(e.target.value); setPage(1); }}><option value="">All states</option>{Object.keys(stateStyles).map((value) => <option key={value}>{value}</option>)}</select>
       <Button variant="outline" onClick={loadUnits} leftIcon={<RefreshCw className="h-4 w-4" />}>Refresh</Button>
       {admin && <><Button variant="outline" onClick={() => setBatchOpen('adopt')}>Adopt stock</Button><Button onClick={() => setBatchOpen('receive')}>Receive units</Button></>}
     </div></Card>
 
-    <Card className="overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Unit</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Manufacturer SN</th><th className="px-4 py-3">State</th><th className="px-4 py-3"></th></tr></thead><tbody className="divide-y divide-slate-100">{units.items.map((unit) => <tr key={unit.id}><td className="px-4 py-3 font-mono font-bold">{unit.internal_sku}</td><td className="px-4 py-3"><p className="font-semibold">{unit.product_name}</p><p className="text-xs text-slate-500">{unit.variant_name || unit.product_sku}</p></td><td className="max-w-xs break-all px-4 py-3 font-mono">{unit.manufacturer_serial_number}</td><td className="px-4 py-3"><span className={`rounded-full border px-2 py-1 text-xs font-semibold ${stateStyles[unit.state]}`}>{unit.state}</span></td><td className="px-4 py-3 text-right"><Button variant="outline" onClick={() => loadDetails(unit.id)}>Details</Button></td></tr>)}</tbody></table></div>{!loading && units.items.length === 0 && <p className="p-10 text-center text-slate-500">No stock units match these filters.</p>}<div className="flex items-center justify-between border-t p-3 text-sm"><span>{units.pagination.total} units</span><div className="flex gap-2"><Button variant="outline" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</Button><span className="px-2 py-2">{page} / {Math.max(1, units.pagination.pages)}</span><Button variant="outline" disabled={page >= units.pagination.pages} onClick={() => setPage(page + 1)}>Next</Button></div></div></Card>
+    <Card className="overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">CT barcode</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Manufacturer SN</th><th className="px-4 py-3">State</th><th className="px-4 py-3"></th></tr></thead><tbody className="divide-y divide-slate-100">{units.items.map((unit) => <tr key={unit.id}><td className="px-4 py-3 font-mono font-bold">{unit.unit_code}</td><td className="px-4 py-3"><p className="font-semibold">{unit.product_name}</p><p className="text-xs text-slate-500">{unit.variant_name || unit.product_code}</p></td><td className="max-w-xs break-all px-4 py-3 font-mono">{unit.manufacturer_serial_number}</td><td className="px-4 py-3"><span className={`rounded-full border px-2 py-1 text-xs font-semibold ${stateStyles[unit.state]}`}>{unit.state}</span></td><td className="px-4 py-3 text-right"><div className="flex justify-end gap-2"><Button variant="outline" leftIcon={<Barcode className="h-4 w-4" />} onClick={() => printUnitBarcode(unit)}>Print</Button><Button variant="outline" onClick={() => loadDetails(unit.id)}>Details</Button></div></td></tr>)}</tbody></table></div>{!loading && units.items.length === 0 && <p className="p-10 text-center text-slate-500">No stock units match these filters.</p>}<div className="flex items-center justify-between border-t p-3 text-sm"><span>{units.pagination.total} units</span><div className="flex gap-2"><Button variant="outline" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</Button><span className="px-2 py-2">{page} / {Math.max(1, units.pagination.pages)}</span><Button variant="outline" disabled={page >= units.pagination.pages} onClick={() => setPage(page + 1)}>Next</Button></div></div></Card>
 
     <Modal open={Boolean(batchOpen)} onClose={() => setBatchOpen(null)} title={batchOpen === 'receive' ? 'Receive serialized units' : 'Adopt existing stock'} description={batchOpen === 'adopt' ? 'The serial count must exactly match the current aggregate quantity.' : 'Receiving creates available units and increases sellable quantity.'}>
       <div className="space-y-3"><select className="h-11 w-full rounded-lg border border-slate-200 px-3" value={targetProduct} onChange={async (e) => { setTargetProduct(e.target.value); setTargetVariant(''); await loadBatchVariants(e.target.value); }}><option value="">Choose product</option>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select><select className="h-11 w-full rounded-lg border border-slate-200 px-3" value={targetVariant} onChange={(e) => setTargetVariant(e.target.value)}><option value="">Product inventory</option>{batchVariants.map((variant) => <option key={variant.id} value={variant.id}>{variant.name}</option>)}</select><textarea className="min-h-44 w-full rounded-lg border border-slate-200 p-3 font-mono text-sm" value={serialText} onChange={(e) => setSerialText(e.target.value)} placeholder="One manufacturer serial per line" /><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setBatchOpen(null)}>Cancel</Button><Button disabled={busy || !targetProduct} onClick={submitBatch}>{batchOpen === 'receive' ? 'Receive units' : 'Adopt stock'}</Button></div></div>
     </Modal>
 
-    <Modal open={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.internal_sku || 'Stock unit'} description={selected ? `${selected.product_name}${selected.variant_name ? ` · ${selected.variant_name}` : ''}` : undefined}>
+    <Modal open={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.unit_code || 'Stock unit'} description={selected ? `${selected.product_name}${selected.variant_name ? ` · ${selected.variant_name}` : ''}` : undefined}>
       {selected && <div className="space-y-4"><div className="rounded-xl bg-slate-50 p-4 text-sm"><p><strong>Manufacturer SN:</strong> <span className="break-all font-mono">{selected.manufacturer_serial_number}</span></p><p><strong>State:</strong> {selected.state}</p>{selected.invoice_number && <p><strong>Sale:</strong> {selected.invoice_number} ({selected.sale_status})</p>}</div><div><h3 className="mb-2 font-bold">Immutable history</h3><div className="max-h-52 space-y-2 overflow-y-auto">{selected.history.map((event) => <div key={event.id} className="border-l-2 border-slate-300 pl-3 text-sm"><p className="font-semibold">{event.event_type}: {event.from_state || 'new'} → {event.to_state}</p><p className="text-xs text-slate-500">{new Date(event.occurred_at).toLocaleString()} · {event.actor_username || 'system'}{event.reason ? ` · ${event.reason}` : ''}</p></div>)}</div></div>{admin && <><input className="h-10 w-full rounded-lg border border-slate-200 px-3" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason / audit note" />{selected.state === 'available' && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="mb-2 text-sm font-semibold text-amber-900">Serial correction retires this unit and creates a replacement with a new internal SU- identity. It never edits historical identity, and the old serial remains reserved.</p><div className="flex gap-2"><input className="h-10 flex-1 rounded-lg border border-amber-300 px-3 font-mono" value={correctedSerial} onChange={(e) => setCorrectedSerial(e.target.value)} placeholder="Correct manufacturer serial" /><Button disabled={busy || !correctedSerial.trim()} onClick={correctSerial}>Retire & replace</Button></div></div>}<div className="flex justify-end gap-2">{selected.state === 'quarantined' && <Button onClick={() => lifecycle('release')}>Release to available</Button>}{(selected.state === 'available' || selected.state === 'quarantined') && <Button variant="danger" leftIcon={<Archive className="h-4 w-4" />} onClick={() => lifecycle('retire')}>Retire unit</Button>}</div></>}</div>}
     </Modal>
   </div>;

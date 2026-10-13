@@ -4,7 +4,7 @@ const inventoryPolicyRoutes = require('../routes/inventory-policies');
 const stockUnitRoutes = require('../routes/stock-units');
 const warrantyLookupRoutes = require('../routes/warranty-lookup');
 const { normalizePolicyPatch } = require('./inventory-policy-service');
-const { listParameters, listStockUnits } = require('./stock-unit-api-service');
+const { listParameters, listStockUnits, lookupStockUnit } = require('./stock-unit-api-service');
 const { normalizeWarrantyLookup } = require('./warranty-lookup-service');
 
 function route(router, path, method) {
@@ -64,6 +64,28 @@ test('stock-unit free-text filtering accepts non-serial punctuation', async () =
   assert.deepEqual(calls[0].values, ['%---%']);
 });
 
+test('stock-unit lookup gives the permanent CT code explicit precedence', async () => {
+  const calls = [];
+  const queryable = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (calls.length === 1) return { rows: [{ id: 7, matched_by: 'unit_code' }] };
+      if (calls.length === 2) return { rows: [{
+        id: 7, unit_code: 'CT000007', internal_sku: 'SU-7',
+        manufacturer_serial_number: 'SER-7', product_id: 2, variant_id: null,
+        product_name: 'Phone', product_sku: 'PHONE', effective_price: '100',
+        state: 'available',
+      }] };
+      return { rows: [] };
+    },
+  };
+  const unit = await lookupStockUnit(queryable, ' ct000007 ');
+  assert.equal(unit.unit_code, 'CT000007');
+  assert.equal(unit.matched_by, 'unit_code');
+  assert.match(calls[0].sql, /UPPER\(unit_code\) = UPPER\(\$1\)/);
+  assert.equal(calls[0].values[0], 'ct000007');
+});
+
 test('warranty lookup requires exactly one supported identity', () => {
   assert.deepEqual(normalizeWarrantyLookup({ invoice_number: ' INV-1 ' }), {
     field: 'invoice_number', value: 'INV-1',
@@ -77,6 +99,10 @@ test('warranty lookup requires exactly one supported identity', () => {
 
 test('read APIs require authentication and mutation APIs require admin', () => {
   assert.deepEqual(middlewareNames(route(stockUnitRoutes, '/', 'get')), ['requireAuth', '<anonymous>']);
+  assert.deepEqual(
+    middlewareNames(route(stockUnitRoutes, '/:id/barcode', 'get')),
+    ['requireAuth', '<anonymous>']
+  );
   assert.deepEqual(
     middlewareNames(route(stockUnitRoutes, '/receive', 'post')).slice(0, 2),
     ['requireAuth', 'requireAdmin']

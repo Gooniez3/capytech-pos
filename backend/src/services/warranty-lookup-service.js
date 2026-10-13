@@ -2,12 +2,12 @@ const { normalizeManufacturerSerial } = require('./serial-number');
 const { InventoryApiError, rejectUnknownFields } = require('./inventory-api-validation');
 
 function normalizeWarrantyLookup(query = {}) {
-  rejectUnknownFields(query, ['invoice_number', 'serial_number', 'internal_sku'], 'query');
-  const provided = ['invoice_number', 'serial_number', 'internal_sku']
+  rejectUnknownFields(query, ['invoice_number', 'serial_number', 'unit_code', 'internal_sku'], 'query');
+  const provided = ['invoice_number', 'serial_number', 'unit_code', 'internal_sku']
     .filter((field) => typeof query[field] === 'string' && query[field].trim() !== '');
   if (provided.length !== 1) {
     throw new InventoryApiError(
-      'Provide exactly one of invoice_number, serial_number, or internal_sku'
+      'Provide exactly one of invoice_number, serial_number, unit_code, or internal_sku'
     );
   }
   const field = provided[0];
@@ -26,7 +26,7 @@ const WARRANTY_SELECT = `
          si.shop_warranty_end_date::text AS shop_warranty_end_date,
          sis.internal_sku_snapshot, sis.manufacturer_serial_number_snapshot,
          sis.assigned_at, sis.released_at, sis.release_reason,
-         su.id AS stock_unit_id, su.internal_sku AS current_internal_sku,
+         su.id AS stock_unit_id, su.unit_code AS current_unit_code, su.internal_sku AS current_internal_sku,
          su.manufacturer_serial_number AS current_manufacturer_serial,
          su.state AS stock_unit_state
   FROM sales s
@@ -43,6 +43,13 @@ async function lookupWarranty(queryable, query) {
       `${WARRANTY_SELECT}
        WHERE UPPER(s.invoice_number) = UPPER($1)
        ORDER BY si.id, sis.id`,
+      [lookup.value]
+    );
+  } else if (lookup.field === 'unit_code') {
+    result = await queryable.query(
+      `${WARRANTY_SELECT}
+       WHERE UPPER(su.unit_code) = UPPER($1)
+       ORDER BY sis.assigned_at DESC, sis.id DESC`,
       [lookup.value]
     );
   } else if (lookup.field === 'internal_sku') {

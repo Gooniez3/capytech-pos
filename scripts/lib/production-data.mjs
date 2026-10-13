@@ -107,6 +107,22 @@ export const ADDITIVE_PROTECTED_SEQUENCES = Object.freeze({
   sale_item_stock_units: Object.freeze(['sale_item_stock_units_id_seq']),
 });
 
+// FIX-01 is optional on pre-upgrade installations. Once unit_code exists, its
+// values and generating sequence become part of every protected-data digest.
+export const FIX01_PROTECTED_COLUMNS = Object.freeze({
+  stock_units: Object.freeze(['unit_code']),
+});
+export const FIX01_PROTECTED_SEQUENCES = Object.freeze(['stock_unit_code_seq']);
+
+export const CP_PROTECTED_TABLE_COLUMNS = Object.freeze({
+  catalog_codes: Object.freeze(['code', 'product_id', 'variant_id', 'created_at']),
+});
+export const CP_PROTECTED_ENTITY_COLUMNS = Object.freeze({
+  products: Object.freeze(['product_code']),
+  product_variants: Object.freeze(['product_code']),
+});
+export const CP_PROTECTED_SEQUENCES = Object.freeze(['catalog_code_seq']);
+
 // Phase 3A is independently optional so pre-3A backups remain comparable.
 // Once installed, every ledger value and its owned sequence are protected.
 export const PHASE3A_PROTECTED_TABLE_COLUMNS = Object.freeze({
@@ -248,8 +264,23 @@ async function currentProtectedShape(client) {
     if (missing.length > 0) {
       throw new Error(`Protected additive columns are missing from public.${table}: ${missing.join(', ')}`);
     }
-    tables[table] = [...columns];
+    const fix01Columns = (FIX01_PROTECTED_COLUMNS[table] || [])
+      .filter((column) => available.has(column));
+    const fix01SequencePresence = table === 'stock_units'
+      ? await Promise.all(FIX01_PROTECTED_SEQUENCES.map((sequence) => relationExists(client, sequence)))
+      : [];
+    if (fix01Columns.length > 0 && fix01Columns.length !== FIX01_PROTECTED_COLUMNS.stock_units.length) {
+      throw new Error('Protected FIX-01 columns are incomplete for public.stock_units.');
+    }
+    if (fix01Columns.length > 0 && fix01SequencePresence.some((present) => !present)) {
+      throw new Error('Protected FIX-01 sequence is missing for public.stock_units.');
+    }
+    if (fix01Columns.length === 0 && fix01SequencePresence.some(Boolean)) {
+      throw new Error('Protected FIX-01 schema is incomplete for public.stock_units.');
+    }
+    tables[table] = [...columns, ...fix01Columns];
     sequences.push(...tableSequences);
+    if (fix01Columns.length > 0) sequences.push(...FIX01_PROTECTED_SEQUENCES);
     additiveTableCount += 1;
   }
   if (
@@ -288,6 +319,27 @@ async function currentProtectedShape(client) {
     const missing = columns.filter((column) => !available.has(column));
     if (missing.length) throw new Error(`Protected Phase 3D columns are missing from public.${table}: ${missing.join(', ')}`);
     tables[table] = [...columns];
+  }
+  const cpTablePresent = await relationExists(client, 'catalog_codes');
+  const cpSequencePresent = await relationExists(client, 'catalog_code_seq');
+  const cpEntityPresence = await Promise.all(Object.entries(CP_PROTECTED_ENTITY_COLUMNS).map(async ([table, columns]) => {
+    const available = availableColumns[table] || await tableColumnNames(client, table);
+    return columns.every((column) => available.has(column));
+  }));
+  // Entity columns are the feature gate. Older test/backup adapters may report
+  // unknown relations as present, so a sequence/table name alone is not enough
+  // to opt an installation into the CP contract.
+  const cpAnyPresent = cpEntityPresence.some(Boolean);
+  const cpComplete = cpTablePresent && cpSequencePresent && cpEntityPresence.every(Boolean);
+  if (cpAnyPresent && !cpComplete) throw new Error('Protected CP catalog-code schema is incomplete.');
+  if (cpComplete) {
+    for (const [table, columns] of Object.entries(CP_PROTECTED_ENTITY_COLUMNS)) tables[table].push(...columns);
+    const available = await tableColumnNames(client, 'catalog_codes');
+    const required = CP_PROTECTED_TABLE_COLUMNS.catalog_codes;
+    const missing = required.filter((column) => !available.has(column));
+    if (missing.length) throw new Error(`Protected CP columns are missing from public.catalog_codes: ${missing.join(', ')}`);
+    tables.catalog_codes = [...required];
+    sequences.push(...CP_PROTECTED_SEQUENCES);
   }
   return validateProtectedShape({
     tables,

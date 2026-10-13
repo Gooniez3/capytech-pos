@@ -1943,7 +1943,7 @@ router.get(
 
               pv.name AS variant_name,
 
-              pv.sku AS sku,
+              pv.product_code AS sku,
 
               pv.stock_quantity AS stock,
 
@@ -1973,7 +1973,7 @@ router.get(
 
               NULL::varchar AS variant_name,
 
-              p.sku AS sku,
+              p.product_code AS sku,
 
               p.stock_quantity AS stock,
 

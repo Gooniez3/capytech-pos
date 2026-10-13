@@ -126,7 +126,7 @@ router.get('/', requireAuth, async (req, res) => {
         SELECT
           p.id,
           p.name,
-          p.sku,
+          p.product_code AS sku,
           p.low_stock_threshold,
 
           CASE
@@ -442,7 +442,7 @@ router.get('/', requireAuth, async (req, res) => {
 
           p.name AS product_name,
           pv.name AS variant_name,
-          pv.sku AS sku,
+          pv.product_code AS sku,
 
           pv.stock_quantity AS stock,
           pv.low_stock_threshold AS reorder_level
@@ -470,7 +470,7 @@ router.get('/', requireAuth, async (req, res) => {
 
           p.name AS product_name,
           NULL::varchar AS variant_name,
-          p.sku AS sku,
+          p.product_code AS sku,
 
           p.stock_quantity AS stock,
           p.low_stock_threshold AS reorder_level

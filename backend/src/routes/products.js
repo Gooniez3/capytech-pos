@@ -1,6 +1,7 @@
 const express = require('express');
-const bwipjs = require('bwip-js');
 const pool = require('../db/pool');
+const { generateBarcodeDataUrl } = require('../services/barcode-service');
+const { allocateCatalogCode } = require('../services/catalog-code-service');
 
 const {
   requireAuth,
@@ -27,24 +28,6 @@ const {
 } = require('../services/product-recycle-bin');
 
 const router = express.Router();
-
-/**
- * Generate Code 128 barcode PNG as a data URL.
- */
-async function generateBarcodeDataUrl(value) {
-  const png = await bwipjs.toBuffer({
-    bcid: 'code128',
-    text: value,
-    scale: 3,
-    height: 12,
-    includetext: true,
-    textxalign: 'center',
-    paddingwidth: 8,
-    paddingheight: 8,
-  });
-
-  return `data:image/png;base64,${png.toString('base64')}`;
-}
 
 /**
  * Normalize all SKUs.
@@ -216,7 +199,7 @@ router.get('/deleted', requireAuth, requireAdmin, async (req, res) => {
     const result = await pool.query(
       `
         SELECT
-          p.id, p.sku, p.name, p.category_id, c.name AS category_name,
+          p.id, p.sku, p.product_code, p.name, p.category_id, c.name AS category_name,
           p.image_url, p.image_path, p.deleted_at, p.deleted_by,
           u.username AS deleted_by_username,
           COUNT(pv.id)::integer AS variant_count,
@@ -275,6 +258,7 @@ router.get(
 
           pv.name AS variant_name,
           pv.sku AS variant_sku,
+          pv.product_code AS variant_product_code,
 
           COALESCE(pv.price, p.price) AS price,
           COALESCE(pv.cost, p.cost) AS cost,
@@ -302,6 +286,7 @@ router.get(
           p.id,
           p.name,
           p.sku,
+          p.product_code,
           p.category_id,
           p.image_url,
           p.image_path,
@@ -316,7 +301,7 @@ router.get(
         LEFT JOIN categories c
           ON c.id = p.category_id
 
-        WHERE UPPER(pv.sku) = UPPER($1)
+        WHERE (UPPER(pv.product_code) = UPPER($1) OR UPPER(pv.sku) = UPPER($1))
           AND pv.is_active = TRUE
           AND p.is_active = TRUE
 
@@ -328,6 +313,7 @@ router.get(
       if (variantResult.rows.length > 0) {
         return res.json({
           type: 'variant',
+          matched_by: cleanSku(variantResult.rows[0].variant_product_code) === sku ? 'product_code' : 'legacy_sku',
           ...variantResult.rows[0],
         });
       }
@@ -346,7 +332,7 @@ router.get(
         LEFT JOIN categories c
           ON c.id = p.category_id
 
-        WHERE UPPER(p.sku) = UPPER($1)
+        WHERE (UPPER(p.product_code) = UPPER($1) OR UPPER(p.sku) = UPPER($1))
           AND p.is_active = TRUE
 
         LIMIT 1
@@ -378,6 +364,7 @@ router.get(
 
       res.json({
         type: 'product',
+        matched_by: cleanSku(product.product_code) === sku ? 'product_code' : 'legacy_sku',
         ...product,
         ...productEffectivePolicy(product),
         has_variants:
@@ -405,7 +392,6 @@ router.post(
   uploadProductImageMiddleware.single('image'),
   async (req, res) => {
     const {
-      sku,
       name,
       category_id,
       price,
@@ -416,18 +402,14 @@ router.post(
     } = req.body;
 
     if (
-      !sku ||
       !name ||
       price === undefined
     ) {
       return res.status(400).json({
         error:
-          'sku, name, and price are required',
+          'name and price are required',
       });
     }
-
-    const normalizedSku =
-      cleanSku(sku);
 
     let variants = [];
 
@@ -457,52 +439,15 @@ router.post(
     try {
       await client.query('BEGIN');
 
-      // ---------------------------------
-      // 1. Validate parent SKU
-      // ---------------------------------
-      const parentSkuCheck =
-        await client.query(
-          `
-          SELECT sku
-          FROM products
-          WHERE UPPER(sku) = UPPER($1)
-
-          UNION ALL
-
-          SELECT sku
-          FROM product_variants
-          WHERE UPPER(sku) = UPPER($1)
-
-          LIMIT 1
-          `,
-          [normalizedSku]
-        );
-
-      if (
-        parentSkuCheck.rows.length > 0
-      ) {
-        await client.query('ROLLBACK');
-
-        return res.status(409).json({
-          error:
-            `Product SKU "${normalizedSku}" already exists`,
-        });
-      }
+      const productCode = await allocateCatalogCode(client);
 
       // ---------------------------------
       // 2. Validate variant SKUs
       // ---------------------------------
-      const normalizedVariants =
-        variants.map((variant) => ({
-          ...variant,
-
-          sku: cleanSku(
-            variant.sku
-          ),
-        }));
-
-      const variantSkuSet =
-        new Set();
+      const normalizedVariants = [];
+      for (const variant of variants) {
+        normalizedVariants.push({ ...variant, product_code: await allocateCatalogCode(client) });
+      }
 
       for (
         const variant
@@ -510,7 +455,7 @@ router.post(
       ) {
         if (
           !variant.name ||
-          !variant.sku
+          !variant.product_code
         ) {
           await client.query(
             'ROLLBACK'
@@ -518,75 +463,10 @@ router.post(
 
           return res.status(400).json({
             error:
-              'Every variant must have a name and SKU',
+              'Every variant must have a name',
           });
         }
 
-        if (
-          variant.sku ===
-          normalizedSku
-        ) {
-          await client.query(
-            'ROLLBACK'
-          );
-
-          return res.status(409).json({
-            error:
-              `Variant SKU "${variant.sku}" cannot match the product SKU`,
-          });
-        }
-
-        if (
-          variantSkuSet.has(
-            variant.sku
-          )
-        ) {
-          await client.query(
-            'ROLLBACK'
-          );
-
-          return res.status(409).json({
-            error:
-              `Duplicate variant SKU "${variant.sku}" in this product`,
-          });
-        }
-
-        variantSkuSet.add(
-          variant.sku
-        );
-
-        const existingSku =
-          await client.query(
-            `
-            SELECT sku
-            FROM products
-            WHERE UPPER(sku) =
-              UPPER($1)
-
-            UNION ALL
-
-            SELECT sku
-            FROM product_variants
-            WHERE UPPER(sku) =
-              UPPER($1)
-
-            LIMIT 1
-            `,
-            [variant.sku]
-          );
-
-        if (
-          existingSku.rows.length > 0
-        ) {
-          await client.query(
-            'ROLLBACK'
-          );
-
-          return res.status(409).json({
-            error:
-              `Variant SKU "${variant.sku}" already exists`,
-          });
-        }
       }
 
       // ---------------------------------
@@ -596,7 +476,7 @@ router.post(
         uploadedImage =
           await uploadProductImage(
             req.file,
-            normalizedSku
+            productCode
           );
       }
 
@@ -609,6 +489,7 @@ router.post(
           INSERT INTO products
           (
             sku,
+            product_code,
             name,
             category_id,
             price,
@@ -621,14 +502,14 @@ router.post(
 
           VALUES
           (
-            $1, $2, $3, $4, $5,
+            $1, $1, $2, $3, $4, $5,
             $6, $7, $8, $9
           )
 
           RETURNING *
           `,
           [
-            normalizedSku,
+            productCode,
             name.trim(),
 
             category_id ||
@@ -669,6 +550,7 @@ router.post(
             product_id,
             name,
             sku,
+            product_code,
             price,
             cost,
             stock_quantity,
@@ -677,7 +559,7 @@ router.post(
 
           VALUES
           (
-            $1, $2, $3, $4,
+            $1, $2, $3, $3, $4,
             $5, $6, $7
           )
           `,
@@ -687,7 +569,7 @@ router.post(
               variant.name
             ).trim(),
 
-            variant.sku,
+            variant.product_code,
 
             variant.price === null ||
             variant.price === undefined
@@ -804,7 +686,9 @@ router.get(
           p.name AS product_name,
           pv.name AS variant_name,
 
-          pv.sku AS sku,
+          pv.product_code AS sku,
+          pv.product_code,
+          pv.sku AS legacy_sku,
 
           COALESCE(
             pv.price,
@@ -849,7 +733,7 @@ router.get(
         LEFT JOIN categories c
           ON c.id = p.category_id
 
-        WHERE UPPER(pv.sku) = UPPER($1)
+        WHERE (UPPER(pv.product_code) = UPPER($1) OR UPPER(pv.sku) = UPPER($1))
           AND pv.is_active = TRUE
           AND p.is_active = TRUE
 
@@ -878,7 +762,9 @@ router.get(
           p.name AS product_name,
           NULL::varchar AS variant_name,
 
-          p.sku AS sku,
+          p.product_code AS sku,
+          p.product_code,
+          p.sku AS legacy_sku,
 
           p.price,
           p.cost,
@@ -926,6 +812,7 @@ router.get(
         WHERE p.is_active = TRUE
           AND (
             p.name ILIKE $1
+            OR p.product_code ILIKE $1
             OR p.sku ILIKE $1
 
             OR EXISTS (
@@ -935,6 +822,7 @@ router.get(
                 AND pv_search.is_active = TRUE
                 AND (
                   pv_search.name ILIKE $1
+                  OR pv_search.product_code ILIKE $1
                   OR pv_search.sku ILIKE $1
                 )
             )
@@ -1173,8 +1061,11 @@ router.get(
         SELECT
           id,
           sku,
+          product_code,
           name,
-          price
+          price,
+          serial_tracking_enabled,
+          EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id=products.id AND pv.is_active=TRUE) AS has_variants
 
         FROM products
 
@@ -1192,14 +1083,25 @@ router.get(
 
       const product = result.rows[0];
 
+      if (product.serial_tracking_enabled || product.has_variants) {
+        return res.status(409).json({
+          error: product.has_variants
+            ? 'Print the barcode for the independently sellable variant.'
+            : 'Serialized merchandise requires an individual CT barcode from Stock Units.',
+          code: product.has_variants ? 'VARIANT_BARCODE_REQUIRED' : 'CT_BARCODE_REQUIRED',
+        });
+      }
+
       const barcode =
         await generateBarcodeDataUrl(
-          product.sku
+          product.product_code
         );
 
       res.json({
         id: product.id,
         sku: product.sku,
+        product_code: product.product_code,
+        barcode_value: product.product_code,
         name: product.name,
         price: product.price,
         barcode,
@@ -1234,13 +1136,11 @@ router.put(
       low_stock_threshold,
     } = req.body;
 
-    if (!sku || !name || price === undefined) {
+    if (!name || price === undefined) {
       return res.status(400).json({
-        error: 'sku, name, and price are required',
+        error: 'name and price are required',
       });
     }
-
-    const normalizedSku = cleanSku(sku);
 
     const client = await pool.connect();
 
@@ -1274,6 +1174,12 @@ router.put(
 
       const existingProduct =
         existingResult.rows[0];
+      const normalizedSku = existingProduct.sku;
+
+      if (sku !== undefined && cleanSku(sku) !== cleanSku(existingProduct.sku)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Product code and legacy SKU identities cannot be changed' });
+      }
 
       const nextStockQuantity = existingProduct.stock_quantity;
 
@@ -1575,15 +1481,12 @@ router.post(
       low_stock_threshold,
     } = req.body;
 
-    if (!name || !sku) {
+    if (!name) {
       return res.status(400).json({
         error:
-          'Variant name and SKU are required',
+          'Variant name is required',
       });
     }
-
-    const normalizedSku =
-      cleanSku(sku);
 
     try {
       const productResult =
@@ -1612,39 +1515,30 @@ router.post(
         });
       }
 
-      if (
-        await skuAlreadyExists(
-          normalizedSku
-        )
-      ) {
-        return res.status(409).json({
-          error:
-            `Variant SKU "${normalizedSku}" already exists`,
-        });
-      }
-
       const result = await pool.query(
         `
+        WITH allocated AS (
+          SELECT format_catalog_code(nextval('catalog_code_seq'::regclass)) AS code
+        )
         INSERT INTO product_variants
         (
           product_id,
           name,
           sku,
+          product_code,
           price,
           cost,
           stock_quantity,
           low_stock_threshold
         )
 
-        VALUES
-        ($1, $2, $3, $4, $5, $6, $7)
+        SELECT $1, $2, code, code, $3, $4, $5, $6 FROM allocated
 
         RETURNING *
         `,
         [
           req.params.id,
           name.trim(),
-          normalizedSku,
 
           price === '' ||
           price === undefined
@@ -1672,8 +1566,7 @@ router.post(
 
       if (err.code === '23505') {
         return res.status(409).json({
-          error:
-            `Variant SKU "${normalizedSku}" already exists`,
+          error: 'A generated product code already exists; retry the request',
         });
       }
 
@@ -1702,32 +1595,14 @@ router.put(
     } = req.body;
 
     try {
-      /*
-       * If SKU is changing, validate uniqueness.
-       */
-      let normalizedSku;
-
-      if (sku !== undefined) {
-        normalizedSku =
-          cleanSku(sku);
-
-        if (
-          await skuAlreadyExists(
-            normalizedSku,
-            {
-              ignoreVariantId:
-                Number(
-                  req.params.variantId
-                ),
-            }
-          )
-        ) {
-          return res.status(409).json({
-            error:
-              'SKU already exists',
-          });
-        }
+      const identity = await pool.query(
+        `SELECT sku FROM product_variants WHERE id=$1 AND product_id=$2 AND is_active=TRUE`,
+        [req.params.variantId, req.params.id]
+      );
+      if (identity.rows[0] && sku !== undefined && cleanSku(sku) !== cleanSku(identity.rows[0].sku)) {
+        return res.status(409).json({ error: 'Variant product code and legacy SKU identities cannot be changed' });
       }
+      const normalizedSku = undefined;
 
       const result = await pool.query(
         `
@@ -1911,6 +1786,8 @@ router.get(
           pv.product_id,
           pv.name AS variant_name,
           pv.sku,
+          pv.product_code,
+          COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled) AS effective_serial_tracking_enabled,
 
           p.name AS product_name,
 
@@ -1944,9 +1821,16 @@ router.get(
       const variant =
         result.rows[0];
 
+      if (variant.effective_serial_tracking_enabled) {
+        return res.status(409).json({
+          error: 'Serialized merchandise requires an individual CT barcode from Stock Units.',
+          code: 'CT_BARCODE_REQUIRED',
+        });
+      }
+
       const barcode =
         await generateBarcodeDataUrl(
-          variant.sku
+          variant.product_code
         );
 
       res.json({
@@ -1961,6 +1845,8 @@ router.get(
           variant.variant_name,
 
         sku: variant.sku,
+        product_code: variant.product_code,
+        barcode_value: variant.product_code,
         price: variant.price,
 
         barcode,

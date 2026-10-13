@@ -38,10 +38,12 @@ test('inline category creation preserves the draft and selects the created categ
   assert.doesNotMatch(source, /setForm\(emptyForm\);[\s\S]{0,200}createCategory/);
 });
 
-test('product UX validates explicit variant prices, whole-number opening stock, and duplicate identities', () => {
+test('product UX validates prices and stock while product identities are server generated', () => {
   assert.match(source, /selling price is required and must be greater than zero/);
   assert.match(source, /opening stock and reorder level must be non-negative whole numbers/);
-  assert.match(source, /Product and variant SKUs must all be unique/);
+  assert.match(source, /Automatically generated on save/);
+  assert.doesNotMatch(source, /label="SKU \/ Scan Code"/);
+  assert.doesNotMatch(source, /sku: form\.sku\.trim/);
   assert.match(source, /serial numbers must be valid and unique/);
   assert.match(source, /automatically create Stock Units/);
   assert.match(source, /Use Restock from the Products list to receive inventory/);

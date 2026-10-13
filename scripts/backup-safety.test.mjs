@@ -15,6 +15,11 @@ import {
 } from './lib/backup-safety.mjs';
 import {
   ADDITIVE_PROTECTED_SEQUENCES,
+  FIX01_PROTECTED_COLUMNS,
+  FIX01_PROTECTED_SEQUENCES,
+  CP_PROTECTED_ENTITY_COLUMNS,
+  CP_PROTECTED_SEQUENCES,
+  CP_PROTECTED_TABLE_COLUMNS,
   ADDITIVE_PROTECTED_TABLE_COLUMNS,
   MANIFEST_FORMAT_VERSION,
   OPTIONAL_PROTECTED_COLUMNS,
@@ -31,6 +36,13 @@ import {
 } from './lib/production-data.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('CP manifests protect entity ownership, registry rows, and sequence state', () => {
+  assert.deepEqual(CP_PROTECTED_ENTITY_COLUMNS.products, ['product_code']);
+  assert.deepEqual(CP_PROTECTED_ENTITY_COLUMNS.product_variants, ['product_code']);
+  assert.deepEqual(CP_PROTECTED_TABLE_COLUMNS.catalog_codes, ['code', 'product_id', 'variant_id', 'created_at']);
+  assert.deepEqual(CP_PROTECTED_SEQUENCES, ['catalog_code_seq']);
+});
 
 test('configured image directory resolves using backend working-directory semantics', () => {
   assert.equal(
@@ -180,6 +192,8 @@ test('Phase 2B protected-data contract includes feature rows, snapshots, and seq
   assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.stock_unit_events.includes('metadata'));
   assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.sale_item_stock_units.includes('internal_sku_snapshot'));
   assert.ok(ADDITIVE_PROTECTED_TABLE_COLUMNS.sale_item_stock_units.includes('manufacturer_serial_number_snapshot'));
+  assert.deepEqual(FIX01_PROTECTED_COLUMNS, { stock_units: ['unit_code'] });
+  assert.deepEqual(FIX01_PROTECTED_SEQUENCES, ['stock_unit_code_seq']);
 });
 
 test('new manifests fail closed on a partially installed Phase 2B schema', async () => {
@@ -394,7 +408,9 @@ test('new manifests automatically protect the complete installed Phase 2B schema
       if (sql.includes('current_database()')) {
         return { rows: [{ database: 'capytech_phase2b_test_manifest', server_version: 'test' }] };
       }
-      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('to_regclass')) return {
+        rows: [{ present: params[0] !== 'public.stock_unit_code_seq' }],
+      };
       if (sql.includes('information_schema.columns')) {
         const table = params[0];
         const columns = PHASE3D_PROTECTED_TABLE_COLUMNS[table]

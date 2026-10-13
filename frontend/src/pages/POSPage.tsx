@@ -61,6 +61,7 @@ import {
   assertCheckoutSelections,
   advanceCheckoutAttempt,
   checkoutAttemptSignature,
+  isUnitBarcode,
   selectedUnitIds,
   warrantySnapshotLabel,
   type StockUnitSummary,
@@ -93,6 +94,7 @@ interface Customer {
 interface ApiProduct {
   id: number | string;
   sku: string;
+  product_code: string;
   name: string;
 
   category_id:
@@ -127,6 +129,7 @@ interface ApiVariant {
 
   name: string;
   sku: string;
+  product_code: string;
 
   price:
     | number
@@ -162,6 +165,8 @@ interface ApiSearchResult {
   variant_name: string | null;
 
   sku: string;
+  product_code?: string;
+  variant_product_code?: string;
 
   price: number | string;
   cost: number | string;
@@ -244,7 +249,7 @@ function mapProduct(
     id: String(product.id),
 
     name: product.name,
-    sku: product.sku,
+    sku: product.product_code || product.sku,
 
     categoryId:
       product.category_id !== null &&
@@ -268,7 +273,7 @@ function mapProduct(
       product.low_stock_threshold ?? 5
     ),
 
-    barcode: product.sku,
+    barcode: product.product_code || product.sku,
 
     image: product.image_url ?? '',
 
@@ -371,6 +376,8 @@ export function POSPage() {
     products,
     setProducts,
   ] = useState<POSProduct[]>([]);
+  const productsRef = useRef<POSProduct[]>(products);
+  productsRef.current = products;
 
   const [
     categories,
@@ -557,8 +564,10 @@ const [loadingStockUnits, setLoadingStockUnits] = useState(false);
 const [checkoutConflict, setCheckoutConflict] = useState('');
 const [submittingSale, setSubmittingSale] = useState(false);
 const [pendingScannedUnit, setPendingScannedUnit] = useState<{
-  cartKey: string; unit: StockUnitSummary;
+  cartKey: string; unit: StockUnitSummary; product?: POSProduct;
 } | null>(null);
+const barcodeLookupInFlightRef = useRef(false);
+const scanConfirmationPendingRef = useRef(false);
 
   const [
     receiptOpen,
@@ -641,7 +650,8 @@ const [
   product: POSProduct;
   parent?: POSProduct;
   variant?: ApiVariant;
-} | null>(null);  
+  barcodeValue: string;
+} | null>(null);
 
   const [
   desktopCartOpen,
@@ -1092,6 +1102,10 @@ const [
       if (!matches || unit.state !== 'available') {
         toast('This code is not an available physical unit for the selected cart item.', 'warning'); return false;
       }
+      if ((selectedStockUnits[cartKey] || []).some((entry) => String(entry.id) === String(unit.id))) {
+        toast('This physical unit is already selected.', 'warning'); return false;
+      }
+      scanConfirmationPendingRef.current = true;
       setPendingScannedUnit({ cartKey, unit });
       setUnitLookupValues((current) => ({ ...current, [cartKey]: '' }));
       return true;
@@ -1400,11 +1414,10 @@ const [
         name:
           `${parent.name} — ${variant.name}`,
 
-        sku:
-          variant.sku,
+          sku: variant.product_code || variant.sku,
 
         barcode:
-          variant.sku,
+          variant.product_code || variant.sku,
 
         price,
         cost,
@@ -1455,12 +1468,75 @@ const lookupBarcode = useCallback(
   async (rawCode: string) => {
     const code = rawCode.trim();
 
-    if (!code || checkoutSubmittingRef.current) {
+    if (!code || checkoutSubmittingRef.current
+      || barcodeLookupInFlightRef.current || scanConfirmationPendingRef.current) {
       return false;
     }
 
+    barcodeLookupInFlightRef.current = true;
+    try {
+
     if (unitSelectionTarget) {
-      return selectUnitByCode(unitSelectionTarget, code);
+      const found = await selectUnitByCode(unitSelectionTarget, code);
+      if (found) scanConfirmationPendingRef.current = true;
+      return found;
+    }
+
+    if (isUnitBarcode(code)) {
+      try {
+        const unit = await api.get<StockUnitSummary>(
+          `/api/stock-units/lookup?code=${encodeURIComponent(code)}`
+        );
+        if (unit.state !== 'available') {
+          toast(`Physical unit ${unit.unit_code} is ${unit.state} and cannot be sold.`, 'warning');
+          return false;
+        }
+        if (Object.values(selectedStockUnits).some((selected) =>
+          selected.some((entry) => String(entry.id) === String(unit.id)))) {
+          toast('This physical unit is already selected.', 'warning');
+          return false;
+        }
+        const parent = productsRef.current.find((product) =>
+          String(product.id) === String(unit.product_id)
+        );
+        if (!parent) {
+          toast('The product for this physical unit is not available at POS.', 'error');
+          return false;
+        }
+        const product: POSProduct = unit.variant_id == null ? {
+          ...parent,
+          serialTrackingEnabled: true,
+          price: Number(unit.effective_price ?? parent.price),
+          stock: Number(unit.effective_stock_quantity ?? parent.stock),
+          shopWarrantyEnabled: unit.effective_shop_warranty_enabled === true,
+          shopWarrantyMonths: unit.effective_shop_warranty_months == null
+            ? null : Number(unit.effective_shop_warranty_months),
+        } : {
+          ...parent,
+          id: `${parent.id}-variant-${unit.variant_id}`,
+          name: `${parent.name} — ${unit.variant_name || unit.variant_sku}`,
+          sku: unit.variant_product_code || unit.product_code || unit.variant_sku || parent.sku,
+          barcode: unit.variant_product_code || unit.product_code || unit.variant_sku || parent.sku,
+          price: Number(unit.effective_price ?? parent.price),
+          stock: Number(unit.effective_stock_quantity ?? 0),
+          hasVariants: false,
+          variantCount: 0,
+          parentProductId: String(parent.id),
+          variantId: String(unit.variant_id),
+          variantName: unit.variant_name || undefined,
+          serialTrackingEnabled: true,
+          shopWarrantyEnabled: unit.effective_shop_warranty_enabled === true,
+          shopWarrantyMonths: unit.effective_shop_warranty_months == null
+            ? null : Number(unit.effective_shop_warranty_months),
+        };
+        scanConfirmationPendingRef.current = true;
+        setPendingScannedUnit({ cartKey: product.id, unit, product });
+        setSearch('');
+        return true;
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'Stock unit not found.', 'error');
+        return false;
+      }
     }
 
     try {
@@ -1474,8 +1550,12 @@ const lookupBarcode = useCallback(
       setSearch('');
 
       if (result.type === 'variant') {
+        if (result.effective_serial_tracking_enabled === true) {
+          toast('Serialized products must be scanned using their unique CT unit barcode.', 'warning');
+          return false;
+        }
         const parentProduct =
-          products.find(
+          productsRef.current.find(
             (product) =>
               product.id ===
               String(
@@ -1508,6 +1588,7 @@ const lookupBarcode = useCallback(
 
           sku:
             result.variant_sku,
+          product_code: result.variant_product_code || result.variant_sku,
 
           price:
             result.price,
@@ -1535,8 +1616,8 @@ const scannedProductProduct: POSProduct = {
 
   name: `${parentProduct.name} — ${variant.name}`,
 
-  sku: variant.sku,
-  barcode: variant.sku,
+  sku: variant.product_code || variant.sku,
+  barcode: variant.product_code || variant.sku,
 
   price:
     variant.price === null ||
@@ -1569,16 +1650,18 @@ const scannedProductProduct: POSProduct = {
   variantName:
     variant.name,
 
-  serialTrackingEnabled: result.effective_serial_tracking_enabled === true,
+  serialTrackingEnabled: false,
   shopWarrantyEnabled: result.effective_shop_warranty_enabled === true,
   shopWarrantyMonths: result.effective_shop_warranty_months == null
     ? null : Number(result.effective_shop_warranty_months),
 };
 
+scanConfirmationPendingRef.current = true;
 setScannedProduct({
   product: scannedProductProduct,
   parent: parentProduct,
   variant,
+  barcodeValue: result.variant_product_code || result.product_code || code,
 });
 
 return true;
@@ -1586,7 +1669,7 @@ return true;
 
       if (result.type === 'product') {
         const product =
-          products.find(
+          productsRef.current.find(
             (item) =>
               item.id ===
               String(result.id)
@@ -1601,16 +1684,24 @@ return true;
           return false;
         }
 
-        if (result.has_variants) {
-          await handleProductClick(
-            product
-          );
-
-          return true;
+        if (result.effective_serial_tracking_enabled === true) {
+          toast('Serialized products must be scanned using their unique CT unit barcode.', 'warning');
+          return false;
         }
 
+        if (result.has_variants) {
+          toast('This product has variants. Scan the exact variant CP barcode.', 'warning');
+          return false;
+        }
+
+        scanConfirmationPendingRef.current = true;
         setScannedProduct({
-  product,
+  product: {
+    ...product,
+    price: Number(result.price),
+    stock: Number(result.stock_quantity),
+  },
+  barcodeValue: result.product_code || code,
 });
 
 return true;
@@ -1631,6 +1722,9 @@ return true;
       );
 
       return false;
+    }
+    } finally {
+      barcodeLookupInFlightRef.current = false;
     }
   },
   // The scanner handler must refresh with the current cart and physical-unit selection state.
@@ -2277,6 +2371,7 @@ type ApiLookupResult =
       variant_id: number | string;
       variant_name: string;
       variant_sku: string;
+      variant_product_code?: string;
     })
   | (ApiSearchResult & {
       type: 'product';
@@ -3267,9 +3362,10 @@ const scannedProductAvailable =
 
 <Modal
   open={Boolean(scannedProduct)}
-  onClose={() =>
-    setScannedProduct(null)
-  }
+  onClose={() => {
+    scanConfirmationPendingRef.current = false;
+    setScannedProduct(null);
+  }}
   title="Scanned Product"
   description="Confirm the scanned item before adding it to the cart."
   size="sm"
@@ -3346,6 +3442,20 @@ const scannedProductAvailable =
               </p>
 
               <p className="text-slate-600">
+                Barcode:{' '}
+                <span className="font-mono font-semibold text-slate-900">
+                  {scannedProduct.barcodeValue}
+                </span>
+              </p>
+
+              <p className="text-slate-600">
+                Selling price:{' '}
+                <span className="font-bold text-slate-900">
+                  {formatCurrency(scannedProduct.product.price)}
+                </span>
+              </p>
+
+              <p className="text-slate-600">
                 Stock:{' '}
                 <span className="font-semibold text-slate-900">
                   {
@@ -3390,21 +3500,11 @@ const scannedProductAvailable =
         <Button
           variant="outline"
           onClick={() => {
+            scanConfirmationPendingRef.current = false;
             setScannedProduct(null);
-
-            /*
-             * Re-open the desktop camera only
-             * when this scan came from it.
-             *
-             * For wireless / USB scans,
-             * simply close the confirmation.
-             */
-            if (scannerOpen) {
-              setScannerOpen(true);
-            }
           }}
         >
-          Scan Again
+          Cancel
         </Button>
 
         <Button
@@ -3422,12 +3522,13 @@ const scannedProductAvailable =
               scannedProduct.product
             );
 
+            scanConfirmationPendingRef.current = false;
             setScannedProduct(null);
           }}
         >
           {scannedProductAvailable <= 0
             ? 'Out of Stock'
-            : 'Add to Cart'}
+            : 'Confirm & Add to Cart'}
         </Button>
 
       </div>
@@ -3437,20 +3538,55 @@ const scannedProductAvailable =
 
 <Modal
   open={Boolean(pendingScannedUnit)}
-  onClose={() => setPendingScannedUnit(null)}
+  onClose={() => {
+    scanConfirmationPendingRef.current = false;
+    setPendingScannedUnit(null);
+  }}
   title="Confirm Physical Unit"
-  description="Verify the manufacturer serial and internal SU- code before adding this exact unit."
+  description="Verify the CT barcode, manufacturer serial, and product before adding this exact unit."
   size="sm"
 >
   {pendingScannedUnit && <div className="space-y-4">
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
       <p className="text-xs font-semibold uppercase text-slate-400">Manufacturer serial</p>
       <p className="mt-1 break-all font-mono font-bold text-slate-900">{pendingScannedUnit.unit.manufacturer_serial_number}</p>
-      <p className="mt-3 text-xs font-semibold uppercase text-slate-400">Internal stock-unit code</p>
-      <p className="mt-1 font-mono font-bold text-slate-900">{pendingScannedUnit.unit.internal_sku}</p>
+      <p className="mt-3 text-xs font-semibold uppercase text-slate-400">Unit barcode</p>
+      <p className="mt-1 font-mono text-lg font-bold text-slate-900">{pendingScannedUnit.unit.unit_code}</p>
+      <p className="mt-1 text-xs text-slate-500">Exact physical unit selected</p>
       <p className="mt-3 text-sm text-slate-600">{pendingScannedUnit.unit.product_name}{pendingScannedUnit.unit.variant_name ? ` · ${pendingScannedUnit.unit.variant_name}` : ''}</p>
+      <p className="mt-3 text-xs font-semibold uppercase text-slate-400">Selling price</p>
+      <p className="mt-1 text-lg font-bold text-slate-900">{formatCurrency(Number(pendingScannedUnit.unit.effective_price ?? pendingScannedUnit.product?.price ?? 0))}</p>
     </div>
-    <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingScannedUnit(null)}>Cancel</Button><Button onClick={() => { const line = cart.find((entry) => entry.product.id === pendingScannedUnit.cartKey); if (line) toggleUnit(pendingScannedUnit.cartKey, pendingScannedUnit.unit, line.quantity); setPendingScannedUnit(null); }}>Confirm exact unit</Button></div>
+    <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => { scanConfirmationPendingRef.current = false; setPendingScannedUnit(null); }}>Cancel</Button><Button onClick={() => {
+      const line = cart.find((entry) => entry.product.id === pendingScannedUnit.cartKey);
+      if (line) {
+        const selected = selectedStockUnits[pendingScannedUnit.cartKey] || [];
+        if (selected.some((entry) => String(entry.id) === String(pendingScannedUnit.unit.id))) {
+          toast('This physical unit is already selected.', 'warning');
+          return;
+        }
+        if (selected.length >= line.quantity) {
+          if (line.quantity >= line.product.stock) {
+            toast(`Only ${line.product.stock} units of ${line.product.name} are in stock.`, 'warning');
+            return;
+          }
+          setCart((current) => current.map((entry) => entry.product.id === pendingScannedUnit.cartKey
+            ? { ...entry, quantity: entry.quantity + 1 } : entry));
+        }
+        setSelectedStockUnits((current) => ({
+          ...current,
+          [pendingScannedUnit.cartKey]: [...(current[pendingScannedUnit.cartKey] || []), pendingScannedUnit.unit],
+        }));
+      } else if (pendingScannedUnit.product) {
+        addToCart(pendingScannedUnit.product);
+        setSelectedStockUnits((current) => ({
+          ...current,
+          [pendingScannedUnit.cartKey]: [pendingScannedUnit.unit],
+        }));
+      }
+      scanConfirmationPendingRef.current = false;
+      setPendingScannedUnit(null);
+    }}>Confirm & Add to Cart</Button></div>
   </div>}
 </Modal>
 
@@ -3648,8 +3784,8 @@ const scannedProductAvailable =
         return <div key={product.id} className="rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">{product.name}</p><p className="font-mono text-xs text-slate-500">{product.sku}</p></div><p className={`text-sm font-bold ${selected.length === line.quantity ? 'text-emerald-700' : 'text-amber-700'}`}>{selected.length} / {line.quantity} selected</p></div>
           <div className="mt-3 flex gap-2"><input className="h-10 min-w-0 flex-1 rounded-lg border border-slate-200 px-3 font-mono text-sm" value={unitLookupValues[product.id] || ''} onFocus={() => setUnitSelectionTarget(product.id)} onChange={(e) => setUnitLookupValues((current) => ({ ...current, [product.id]: e.target.value }))} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void selectUnitByCode(product.id, unitLookupValues[product.id] || ''); } }} placeholder="Scan or enter manufacturer SN / SU- code" /><Button variant="outline" onClick={() => selectUnitByCode(product.id, unitLookupValues[product.id] || '')}>Add</Button><Button variant={unitSelectionTarget === product.id ? 'secondary' : 'outline'} onClick={() => { setUnitSelectionTarget(product.id); setScannerOpen(true); }}>Camera</Button></div>
-          <div className="mt-3 max-h-36 space-y-1 overflow-y-auto">{available.map((unit) => { const checked = selected.some((entry) => String(entry.id) === String(unit.id)); return <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-xs ${checked ? 'border-brand-500 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number}</span><span className="shrink-0 font-mono font-bold">{unit.internal_sku}</span></button>; })}{!loadingStockUnits && available.length === 0 && <p className="py-2 text-center text-xs text-slate-500">No available units. Refresh or review Stock Units.</p>}</div>
-          {selected.length > 0 && <div className="mt-2 space-y-1"><p className="text-xs font-semibold text-slate-700">Confirmed physical units</p>{selected.map((unit) => <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className="flex w-full items-center justify-between gap-2 rounded-md bg-slate-100 px-2 py-1 text-left text-xs"><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number} ({unit.internal_sku})</span><span className="shrink-0 font-semibold text-red-600">Remove</span></button>)}</div>}
+          <div className="mt-3 max-h-36 space-y-1 overflow-y-auto">{available.map((unit) => { const checked = selected.some((entry) => String(entry.id) === String(unit.id)); return <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-xs ${checked ? 'border-brand-500 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number}</span><span className="shrink-0 font-mono font-bold">{unit.unit_code}</span></button>; })}{!loadingStockUnits && available.length === 0 && <p className="py-2 text-center text-xs text-slate-500">No available units. Refresh or review Stock Units.</p>}</div>
+          {selected.length > 0 && <div className="mt-2 space-y-1"><p className="text-xs font-semibold text-slate-700">Confirmed physical units</p>{selected.map((unit) => <button type="button" key={unit.id} onClick={() => toggleUnit(product.id, unit, line.quantity)} className="flex w-full items-center justify-between gap-2 rounded-md bg-slate-100 px-2 py-1 text-left text-xs"><span className="min-w-0 break-all font-mono">{unit.manufacturer_serial_number} ({unit.unit_code})</span><span className="shrink-0 font-semibold text-red-600">Remove</span></button>)}</div>}
         </div>;
       })}
     </section>

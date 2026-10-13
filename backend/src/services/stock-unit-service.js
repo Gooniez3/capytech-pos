@@ -370,7 +370,7 @@ async function createUnits(client, target, serials, actorUserId, source) {
           INSERT INTO stock_units
             (manufacturer_serial_number, product_id, variant_id)
           VALUES ($1, $2, $3)
-          RETURNING id, internal_sku, manufacturer_serial_number,
+          RETURNING id, internal_sku, unit_code, manufacturer_serial_number,
                     normalized_serial_number, product_id, variant_id, state
         `,
         [serial.original, target.productId, target.variantId]

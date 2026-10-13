@@ -44,6 +44,14 @@ import {
   MIGRATION_NAME as P3D_MIGRATION_NAME, NEW_TABLES as P3D_NEW_TABLES,
   NEW_SEQUENCES as P3D_NEW_SEQUENCES,
 } from '../migrations/1791936000000_p3d-inventory-receipts.mjs';
+import {
+  up as fix01Up, down as fix01Down, UP_SQL as FIX01_UP_SQL,
+  MIGRATION_NAME as FIX01_MIGRATION_NAME, NEW_SEQUENCES as FIX01_NEW_SEQUENCES,
+} from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
+import {
+  up as cpUp, down as cpDown, UP_SQL as CP_UP_SQL,
+  MIGRATION_NAME as CP_MIGRATION_NAME, NEW_SEQUENCES as CP_NEW_SEQUENCES,
+} from '../migrations/1792108800000_cp-catalog-codes.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
@@ -52,7 +60,9 @@ const P10 = '1791676800000_p10-invoice-warranty';
 const P2B = '1791763200000_p2b-stock-unit-warranty-schema';
 const P3A = '1791849600000_p3a-inventory-movements';
 const P3D = '1791936000000_p3d-inventory-receipts';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B, P3A, P3D];
+const FIX01 = '1792022400000_fix01-stock-unit-barcode-codes';
+const CP = '1792108800000_cp-catalog-codes';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B, P3A, P3D, FIX01, CP];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -214,6 +224,11 @@ test('installed node-pg-migrate loads all migrations deterministically without e
     await migrations[7].up(builder);
     return builder.getSql();
   };
+  const buildFix01=async()=>{
+    const builder=new MigrationBuilder(client,{},false,console);
+    await migrations[8].up(builder);
+    return builder.getSql();
+  };
   assert.equal(await buildBaseline(),await buildBaseline());
   assert.equal(await buildP04(),await buildP04());
   assert.equal(await buildP06(),await buildP06());
@@ -222,7 +237,41 @@ test('installed node-pg-migrate loads all migrations deterministically without e
   assert.equal(await buildP2B(),await buildP2B());
   assert.equal(await buildP3A(),await buildP3A());
   assert.equal(await buildP3D(),await buildP3D());
+  assert.equal(await buildFix01(),await buildFix01());
   assert.ok(client.queries.every(sql=>sql.startsWith('SELECT ')));
+});
+
+test('FIX-01 reserves and backfills immutable permanent CT unit barcodes',()=>{
+  assert.equal(FIX01_MIGRATION_NAME,FIX01);
+  assert.deepEqual(FIX01_NEW_SEQUENCES,['stock_unit_code_seq']);
+  assert.match(FIX01_UP_SQL,/CT stock-unit barcode namespace collision/);
+  assert.match(FIX01_UP_SQL,/products[\s\S]*product_variants[\s\S]*normalized_serial_number/);
+  assert.match(FIX01_UP_SQL,/UPDATE public\.stock_units[\s\S]*WHERE unit_code IS NULL/);
+  assert.match(FIX01_UP_SQL,/unit_code ~ '\^CT\[0-9\]\{6,\}\$'/);
+  assert.match(FIX01_UP_SQL,/NEW\.unit_code IS DISTINCT FROM OLD\.unit_code/);
+  assert.doesNotMatch(FIX01_UP_SQL,/\binvoice_number_seq\b/i);
+  assert.doesNotMatch(FIX01_UP_SQL,/\b(sales|sale_items|sale_item_stock_units|stock_unit_events)\s+(SET|ADD|DROP|UPDATE|DELETE)/i);
+  assert.throws(fix01Down,/intentionally blocked/);
+  const client=catalogClient(empty());
+  const builder=new MigrationBuilder(client,{},false,console);
+  fix01Up(builder);
+  assert.ok(builder.getSql().includes(FIX01_UP_SQL));
+  assert.deepEqual(client.queries,[]);
+});
+
+test('Phase B adds globally unique immutable CP catalog identities without rewriting SKUs',()=>{
+  assert.equal(CP_MIGRATION_NAME,CP);
+  assert.deepEqual(CP_NEW_SEQUENCES,['catalog_code_seq']);
+  assert.match(CP_UP_SQL,/CREATE TABLE public\.catalog_codes/);
+  assert.match(CP_UP_SQL,/CP catalog-code namespace collision/);
+  assert.match(CP_UP_SQL,/ALTER TABLE public\.products ADD COLUMN product_code/);
+  assert.match(CP_UP_SQL,/ALTER TABLE public\.product_variants ADD COLUMN product_code/);
+  assert.match(CP_UP_SQL,/catalog_codes_immutable_trg/);
+  assert.doesNotMatch(CP_UP_SQL,/DROP COLUMN|DROP TABLE|TRUNCATE|ALTER COLUMN sku|UPDATE public\.sales|UPDATE public\.sale_items/i);
+  const builder={sql(value){this.value=value;}};
+  cpUp(builder);
+  assert.equal(builder.value,CP_UP_SQL);
+  assert.throws(()=>cpDown(),/rollback is intentionally blocked/);
 });
 
 test('Phase 3D adds immutable idempotency receipts without changing inventory history',()=>{

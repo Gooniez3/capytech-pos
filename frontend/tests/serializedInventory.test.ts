@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertCheckoutSelections,
+  isUnitBarcode,
   advanceCheckoutAttempt,
   checkoutAttemptSignature,
   normalizedSerialKey,
@@ -9,6 +10,14 @@ import {
   validateSerialBatch,
   warrantySnapshotLabel,
 } from '../src/lib/serializedInventory.ts';
+
+test('physical-unit barcode recognition reserves only the CT numeric namespace', () => {
+  assert.equal(isUnitBarcode('CT000001'), true);
+  assert.equal(isUnitBarcode(' ct1234567 '), true);
+  assert.equal(isUnitBarcode('CT12345'), false);
+  assert.equal(isUnitBarcode('SU-1'), false);
+  assert.equal(isUnitBarcode('PRODUCT-CT000001'), false);
+});
 
 test('manual and scanner serial normalization are equivalent', () => {
   assert.equal(normalizedSerialKey(' sn-00 1 '), normalizedSerialKey('SN001'));
