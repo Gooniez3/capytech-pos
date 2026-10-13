@@ -27,3 +27,23 @@ test('restock UI derives serialized quantity and reuses an idempotency key only 
   assert.match(source, /idempotency_key: restockAttempt\.current\.key/);
   assert.match(source, /Current Stock \(read-only\)/);
 });
+
+test('inline category creation preserves the draft and selects the created category', () => {
+  assert.match(source, /\+ New Category/);
+  assert.match(source, /api\.post<ApiCategory>\('\/api\/categories', \{ name \}\)/);
+  assert.match(source, /api\.get<ApiCategory\[]>\('\/api\/categories'\)/);
+  assert.match(source, /setForm\(\(current\) => \(\{ \.\.\.current, categoryId: String\(created\.id\) \}\)\)/);
+  assert.match(source, /Category name is required\./);
+  assert.match(source, /setCategoryError\(error instanceof Error \? error\.message/);
+  assert.doesNotMatch(source, /setForm\(emptyForm\);[\s\S]{0,200}createCategory/);
+});
+
+test('product UX validates explicit variant prices, whole-number opening stock, and duplicate identities', () => {
+  assert.match(source, /selling price is required and must be greater than zero/);
+  assert.match(source, /opening stock and reorder level must be non-negative whole numbers/);
+  assert.match(source, /Product and variant SKUs must all be unique/);
+  assert.match(source, /serial numbers must be valid and unique/);
+  assert.match(source, /automatically create Stock Units/);
+  assert.match(source, /Use Restock from the Products list to receive inventory/);
+  assert.match(source, /compactMobile/);
+});

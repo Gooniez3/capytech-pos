@@ -265,8 +265,13 @@ export function ProductsPage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [productFormError, setProductFormError] = useState<string | null>(null);
 
   const [addOpen, setAddOpen] = useState(false);
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
 
 const [editingProduct, setEditingProduct] =
   useState<ProductView | null>(null);
@@ -411,6 +416,53 @@ async function toggleProductVariants(
     }
   }
 
+  function openCategoryModal() {
+    setNewCategoryName('');
+    setCategoryError(null);
+    setCategoryModalOpen(true);
+  }
+
+  function closeCategoryModal() {
+    if (categorySaving) return;
+    setCategoryModalOpen(false);
+    setCategoryError(null);
+  }
+
+  async function createCategory() {
+    if (categorySaving) return;
+    const name = newCategoryName.trim();
+    if (!name) {
+      setCategoryError('Category name is required.');
+      return;
+    }
+    if (name.length > 100) {
+      setCategoryError('Category name must be 100 characters or fewer.');
+      return;
+    }
+    setCategorySaving(true);
+    setCategoryError(null);
+    try {
+      const created = await api.post<ApiCategory>('/api/categories', { name });
+      setForm((current) => ({ ...current, categoryId: String(created.id) }));
+      setCategories((current) => [
+        ...current.filter((category) => category.id !== String(created.id)),
+        mapCategory(created),
+      ].sort((left, right) => left.name.localeCompare(right.name)));
+      setCategoryModalOpen(false);
+      toast(`Category “${created.name}” created and selected.`, 'success');
+      try {
+        const refreshed = await api.get<ApiCategory[]>('/api/categories');
+        setCategories(refreshed.map(mapCategory));
+      } catch {
+        toast('Category was created and selected, but the category list could not be refreshed.', 'error');
+      }
+    } catch (error) {
+      setCategoryError(error instanceof Error ? error.message : 'Failed to create category. Try again.');
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
   function closeRestock() {
     if (restockSaving) return;
     setRestockProduct(null);
@@ -528,6 +580,7 @@ async function toggleProductVariants(
     field: keyof ProductForm,
     value: string
   ) {
+    setProductFormError(null);
     setForm((current) => ({
       ...current,
       [field]: value,
@@ -726,6 +779,7 @@ function updateVariant(
   field: keyof VariantForm,
   value: string
 ) {
+  setProductFormError(null);
   setVariants((current) =>
     current.map((variant, i) => {
       if (i !== index) return variant;
@@ -774,6 +828,7 @@ async function removeVariant(index: number) {
 
   setVariants([]);
   setRemovedVariantIds([]);
+  setProductFormError(null);
   resetImageState();
   setAddOpen(true);
 }
@@ -782,6 +837,7 @@ async function openEditProduct(
   product: ProductView
 ) {
   setEditingProduct(product);
+  setProductFormError(null);
 
   setSelectedImage(null);
   setImagePreview(product.imageUrl ?? null);
@@ -877,17 +933,23 @@ async function openEditProduct(
   setForm(emptyForm);
   setVariants([]);
   setRemovedVariantIds([]);
+  setProductFormError(null);
   resetImageState();
 }
 
   async function saveProduct() {
+  setProductFormError(null);
+  const rejectForm = (message: string) => {
+    setProductFormError(message);
+    toast(message, 'error');
+  };
   if (!form.name.trim()) {
-    toast('Product name is required.', 'error');
+    rejectForm('Product name is required.');
     return;
   }
 
   if (!form.sku.trim()) {
-    toast('SKU is required.', 'error');
+    rejectForm('SKU is required.');
     return;
   }
 
@@ -897,18 +959,14 @@ async function openEditProduct(
   const reorderLevel = Number(form.reorderLevel || 5);
 
   if (Number.isNaN(price) || price <= 0) {
-    toast(
-      'Please enter a valid selling price.',
-      'error'
-    );
+    rejectForm('Please enter a valid selling price.');
     return;
   }
 
-  if (cost < 0 || stock < 0 || reorderLevel < 0) {
-    toast(
-      'Cost, stock and reorder level cannot be negative.',
-      'error'
-    );
+  if (!Number.isFinite(cost) || cost < 0
+    || !Number.isSafeInteger(stock) || stock < 0
+    || !Number.isSafeInteger(reorderLevel) || reorderLevel < 0) {
+    rejectForm('Cost must be valid; opening stock and reorder level must be non-negative whole numbers.');
     return;
   }
 
@@ -917,18 +975,12 @@ async function openEditProduct(
     const variant = variants[i];
 
     if (!variant.name.trim()) {
-      toast(
-        `Variant ${i + 1}: name is required.`,
-        'error'
-      );
+      rejectForm(`Variant ${i + 1}: name is required.`);
       return;
     }
 
     if (!variant.sku.trim()) {
-      toast(
-        `Variant ${i + 1}: SKU is required.`,
-        'error'
-      );
+      rejectForm(`Variant ${i + 1}: SKU is required.`);
       return;
     }
 
@@ -938,39 +990,30 @@ async function openEditProduct(
     );
 
     if (
-      Number.isNaN(variantStock) ||
+      !Number.isSafeInteger(variantStock) ||
       variantStock < 0 ||
-      Number.isNaN(variantReorder) ||
+      !Number.isSafeInteger(variantReorder) ||
       variantReorder < 0
     ) {
-      toast(
-        `Variant ${i + 1}: stock values are invalid.`,
-        'error'
-      );
+      rejectForm(`Variant ${i + 1}: opening stock and reorder level must be non-negative whole numbers.`);
       return;
     }
 
     if (
-      variant.price &&
-      (Number.isNaN(Number(variant.price)) ||
-        Number(variant.price) < 0)
+      !variant.price.trim() ||
+      Number.isNaN(Number(variant.price)) ||
+      Number(variant.price) <= 0
     ) {
-      toast(
-        `Variant ${i + 1}: price is invalid.`,
-        'error'
-      );
+      rejectForm(`Variant ${i + 1}: selling price is required and must be greater than zero.`);
       return;
     }
 
     if (
-      variant.cost &&
-      (Number.isNaN(Number(variant.cost)) ||
-        Number(variant.cost) < 0)
+      !variant.cost.trim() ||
+      Number.isNaN(Number(variant.cost)) ||
+      Number(variant.cost) < 0
     ) {
-      toast(
-        `Variant ${i + 1}: cost is invalid.`,
-        'error'
-      );
+      rejectForm(`Variant ${i + 1}: cost price is required and cannot be negative.`);
       return;
     }
   }
@@ -980,16 +1023,16 @@ async function openEditProduct(
     variant.sku.trim().toUpperCase()
   );
 
-  if (new Set(skuList).size !== skuList.length) {
-    toast(
-      'Each variant must have a unique SKU.',
-      'error'
-    );
+  if (new Set(skuList).size !== skuList.length
+    || skuList.includes(form.sku.trim().toUpperCase())) {
+    rejectForm('Product and variant SKUs must all be unique.');
     return;
   }
 
   if (!editingProduct) {
     const normalizeSerial = (value: string) => value.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    const serialLinesForValidation = (value: string) => value.split(/\r?\n/)
+      .map((line) => line.trim()).filter(Boolean).map(normalizeSerial);
     const validateSerials = (label: string, quantity: number, value: string, tracked: boolean) => {
       const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const normalized = lines.map(normalizeSerial);
@@ -1010,7 +1053,18 @@ async function openEditProduct(
       )).find(Boolean)
       : validateSerials('Product', stock, form.serialNumbers, form.serialTrackingEnabled);
     if (serialError) {
-      toast(serialError, 'error');
+      rejectForm(serialError);
+      return;
+    }
+    const allOpeningSerials = variants.length
+      ? variants.flatMap((variant) => {
+        const tracked = variant.serialSetting === 'on'
+          || (variant.serialSetting === 'inherit' && form.serialTrackingEnabled);
+        return tracked ? serialLinesForValidation(variant.serialNumbers) : [];
+      })
+      : form.serialTrackingEnabled ? serialLinesForValidation(form.serialNumbers) : [];
+    if (new Set(allOpeningSerials).size !== allOpeningSerials.length) {
+      rejectForm('Opening serial numbers must be unique across the entire product and all variants.');
       return;
     }
   }
@@ -1070,12 +1124,9 @@ setExpandedProductId(null);
 
     await loadData();
   } catch (error) {
-    toast(
-      error instanceof Error
-        ? error.message
-        : 'Failed to save product.',
-      'error'
-    );
+    const message = error instanceof Error ? error.message : 'Failed to save product.';
+    setProductFormError(message);
+    toast(message, 'error');
   } finally {
     setSaving(false);
   }
@@ -2000,6 +2051,7 @@ function printBarcodeLabel({
         title="Restock Product"
         description={restockProduct ? `Receive inventory for ${restockProduct.name}.` : undefined}
         size="sm"
+        compactMobile
         footer={
           <>
             <Button variant="outline" onClick={closeRestock} disabled={restockSaving}>Cancel</Button>
@@ -2091,6 +2143,7 @@ function printBarcodeLabel({
             : 'Fill in the product details below.'
         }
         size="lg"
+        compactMobile
         footer={
           <>
             <Button
@@ -2256,32 +2309,28 @@ function printBarcodeLabel({
             placeholder="e.g. KB-LGX-001"
           />
 
-          <Select
-            label="Category"
-            name="category"
-            value={form.categoryId}
-            onChange={(e) =>
-              updateForm(
-                'categoryId',
-                e.target.value
-              )
-            }
-          >
-            <option value="">
-              No Category
-            </option>
-
-            {categories.map(
-              (category) => (
-                <option
-                  key={category.id}
-                  value={category.id}
-                >
-                  {category.name}
-                </option>
-              )
-            )}
-          </Select>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label htmlFor="category" className="text-sm font-medium text-slate-700">Category</label>
+              <button
+                type="button"
+                onClick={openCategoryModal}
+                className="text-xs font-semibold text-brand-700 hover:text-brand-800"
+              >
+                + New Category
+              </button>
+            </div>
+            <Select
+              name="category"
+              value={form.categoryId}
+              onChange={(e) => updateForm('categoryId', e.target.value)}
+            >
+              <option value="">No Category</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>{category.name}</option>
+              ))}
+            </Select>
+          </div>
 
           <Input
             label="Selling Price (Ks)"
@@ -2327,6 +2376,9 @@ function printBarcodeLabel({
             }
             placeholder="24"
             disabled={!!editingProduct || variants.length > 0}
+            hint={editingProduct
+              ? 'Use Restock from the Products list to receive inventory.'
+              : 'Starting quantity only. Use Restock for future deliveries.'}
           />
 
           <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
@@ -2341,7 +2393,7 @@ function printBarcodeLabel({
             />
             <span>
               <span className="block text-sm font-medium text-slate-700">Track individual serial numbers</span>
-              <span className="block text-xs text-slate-500">Serialized stock becomes sellable only after every physical unit is registered.</span>
+              <span className="block text-xs text-slate-500">Serialized stock becomes sellable only after every physical unit is registered. Opening serials entered below automatically create Stock Units.</span>
             </span>
           </label>
 
@@ -2379,11 +2431,11 @@ function printBarcodeLabel({
   <div className="flex items-end justify-between mb-2">
     <div>
       <label className="block text-sm font-medium text-slate-700">
-        Variants
+        Product Variants
       </label>
 
       <p className="text-xs text-slate-400 mt-1">
-        Optional
+        Optional — each variant has its own SKU, selling price, cost price, and stock.
       </p>
     </div>
 
@@ -2393,7 +2445,7 @@ function printBarcodeLabel({
       className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
     >
       <Plus className="h-4 w-4" />
-      Add
+      Add Variant
     </button>
   </div>
 
@@ -2414,7 +2466,7 @@ function printBarcodeLabel({
           key={variant.id ?? `new-${index}`}
           className="rounded-lg border border-slate-200 bg-slate-50 p-2"
         >
-          <div className="grid grid-cols-[1fr_80px_36px] gap-2 items-center">
+          <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[1fr_110px_36px]">
             <input
               value={variant.name}
               onChange={(e) =>
@@ -2424,7 +2476,7 @@ function printBarcodeLabel({
                   e.target.value
                 )
               }
-              placeholder="White"
+              placeholder="Variant name, e.g. White"
               className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
             />
 
@@ -2439,7 +2491,7 @@ function printBarcodeLabel({
                   e.target.value
                 )
               }
-              placeholder="Stock"
+              placeholder={editingProduct ? 'Current stock' : 'Opening stock'}
               disabled={!!editingProduct}
               className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
             />
@@ -2447,7 +2499,7 @@ function printBarcodeLabel({
             <button
               type="button"
               onClick={() => removeVariant(index)}
-              className="flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-danger-50 hover:text-danger-600"
+              className="flex h-9 w-9 items-center justify-center justify-self-end rounded-md text-slate-400 hover:bg-danger-50 hover:text-danger-600"
               title="Remove variant"
             >
               <Trash2 className="h-4 w-4" />
@@ -2472,7 +2524,7 @@ function printBarcodeLabel({
               min="0"
               value={variant.price}
               onChange={(event) => updateVariant(index, 'price', event.target.value)}
-              placeholder={`Selling price (${form.price || 'product'})`}
+              placeholder="Selling price (required)"
               className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500"
             />
             <input
@@ -2480,7 +2532,7 @@ function printBarcodeLabel({
               min="0"
               value={variant.cost}
               onChange={(event) => updateVariant(index, 'cost', event.target.value)}
-              placeholder={`Cost (${form.cost || 'product'})`}
+              placeholder="Cost price (required)"
               className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand-500"
             />
             <select
@@ -2506,6 +2558,7 @@ function printBarcodeLabel({
                 placeholder="Scan or enter one serial number per line"
                 className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 font-mono text-xs outline-none focus:border-brand-500"
               />
+              <span className="mt-1 block font-normal text-slate-500">Saving registers these physical units as Stock Units automatically.</span>
             </label>
           )}
           </div>
@@ -2526,6 +2579,11 @@ function printBarcodeLabel({
   )}
 </div>
 </div>
+        {productFormError && (
+          <p role="alert" className="mt-4 rounded-lg border border-danger-200 bg-danger-50 px-3 py-2 text-sm text-danger-700">
+            {productFormError}
+          </p>
+        )}
         <div className="mt-4 rounded-lg border border-brand-100 bg-brand-50/50 px-4 py-3">
           <p className="text-sm font-medium text-brand-800">
             Barcode scanning
@@ -2537,6 +2595,44 @@ function printBarcodeLabel({
             for scanning at the POS.
           
           </p>
+        </div>
+      </Modal>
+
+      <Modal
+        open={categoryModalOpen}
+        onClose={closeCategoryModal}
+        title="New Category"
+        description="Create a category without leaving your unsaved product."
+        size="sm"
+        compactMobile
+        footer={
+          <>
+            <Button variant="outline" onClick={closeCategoryModal} disabled={categorySaving}>Cancel</Button>
+            <Button onClick={createCategory} loading={categorySaving}>Create & Select</Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <Input
+            autoFocus
+            label="Category name"
+            name="new-category-name"
+            value={newCategoryName}
+            onChange={(event) => {
+              setNewCategoryName(event.target.value);
+              setCategoryError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                createCategory();
+              }
+            }}
+            maxLength={100}
+            placeholder="e.g. Laptops"
+            error={categoryError ?? undefined}
+          />
+          <p className="text-xs text-slate-500">Your current product details, variants, prices, stock, and image remain unchanged.</p>
         </div>
       </Modal>
 
