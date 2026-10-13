@@ -17,6 +17,7 @@
     "test:stock-unit-domain": "node --test src/services/stock-unit-policy.test.js src/services/serial-number.test.js src/services/shop-warranty-period.test.js src/services/stock-unit-service.test.js",
     "test:stock-unit-integration": "node --test scripts/stock-unit-service.integration.test.mjs",
     "test:quantity-inventory": "node --test src/services/quantity-inventory-service.test.js",
+    "test:quantity-ledger-routing": "node --test src/services/inventory-ledger-routing.test.js src/services/quantity-inventory-service.test.js src/services/sale-reversal.test.js src/services/checkout-fingerprint.test.js",
     "test:quantity-inventory-integration": "node --test scripts/quantity-inventory.integration.test.mjs",
     "test:product-workflow": "node --test src/services/product-workflow-service.test.js",
     "test:product-workflow-integration": "node --test scripts/product-workflow.integration.test.mjs",

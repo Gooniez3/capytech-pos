@@ -1,9 +1,9 @@
 const { transactionClient, withTransactionOperation } = require('./domain-transaction');
 const { lockInventoryTargets, StockUnitDomainError } = require('./stock-unit-service');
 
-// Phase 3A provides the transaction-aware foundation only. Existing checkout,
-// refund/void, and legacy product stock-update paths are integrated later; this
-// ledger must not be treated as complete historical inventory before then.
+// This ledger starts at the Phase 3A migration boundary. It records supported
+// mutations from that point forward and intentionally does not fabricate older
+// inventory history.
 
 const MOVEMENT_TYPES = Object.freeze([
   'opening', 'received', 'adjusted', 'sold', 'refunded', 'voided',
@@ -78,7 +78,10 @@ async function applyQuantityMovementsOperation(transaction, input) {
   const actorUserId = optionalPositiveInteger(input.actorUserId, 'actor user id');
   let targets;
   try {
-    targets = await lockInventoryTargets(client, movements);
+    targets = await lockInventoryTargets(client, movements, {
+      requireActive: input.requireActive !== false,
+      enforceVariantTarget: input.enforceVariantTarget !== false,
+    });
   } catch (error) {
     if (error instanceof StockUnitDomainError) {
       throw new QuantityInventoryError(error.message, error.code, error.statusCode);

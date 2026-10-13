@@ -8,6 +8,7 @@ import { UP_SQL as P06 } from '../migrations/1788652800002_p06-checkout-request-
 import { UP_SQL as P08 } from '../migrations/1788652800003_p08-product-recycle-bin.mjs';
 import { UP_SQL as P10 } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 import { UP_SQL as P2B } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
+import { UP_SQL as P3A } from '../migrations/1791849600000_p3a-inventory-movements.mjs';
 
 const require = createRequire(import.meta.url);
 const { withTransaction } = require('../src/services/domain-transaction');
@@ -57,6 +58,7 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       await bootstrap.query(P08);
       await bootstrap.query(P10);
       await bootstrap.query(P2B);
+      await bootstrap.query(P3A);
       await bootstrap.query('COMMIT');
     } finally { await bootstrap.end(); }
 

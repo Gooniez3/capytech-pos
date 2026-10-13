@@ -37,6 +37,7 @@ const {
 } = require('../services/stock-unit-service');
 const { buildShopWarrantySnapshot } = require('../services/shop-warranty-period');
 const { loadSaleItemsWithStockUnits } = require('../services/sale-read-model');
+const { applyQuantityMovements } = require('../services/quantity-inventory-service');
 
 const router = express.Router();
 
@@ -285,7 +286,9 @@ async function reverseSaleInventory(client, transaction, items, {
       reason,
     });
   }
-  if (untrackedItems.length > 0) await restoreExactInventory(client, untrackedItems);
+  if (untrackedItems.length > 0) await restoreExactInventory(transaction, untrackedItems, {
+    action, saleId, actorUserId, reason,
+  });
 }
 
 router.post('/', requireAuth, async (req, res) => {
@@ -578,8 +581,8 @@ p.name AS product_name
         });
 
         if (variant.serial_tracking_enabled !== true) inventoryMutations.push({
-          table: 'product_variants',
-          id: variant.variant_id,
+          productId: Number(variant.product_id),
+          variantId: Number(variant.variant_id),
           quantity,
           previousStock: Number(variant.stock_quantity),
           threshold: Number(variant.low_stock_threshold ?? 2),
@@ -719,8 +722,8 @@ continue;
       });
 
       if (product.serial_tracking_enabled !== true) inventoryMutations.push({
-        table: 'products',
-        id: product.id,
+        productId: Number(product.id),
+        variantId: null,
         quantity,
         previousStock: Number(product.stock_quantity),
         threshold: Number(product.low_stock_threshold ?? 5),
@@ -803,22 +806,22 @@ continue;
         : requestedWarrantyMonths;
 
     /* All inventory and monetary validation is complete before this point. */
-    for (const mutation of inventoryMutations) {
-      const updatedResult = await client.query(
-        `
-          UPDATE ${mutation.table}
-          SET stock_quantity = stock_quantity - $1, updated_at = NOW()
-          WHERE id = $2
-          RETURNING stock_quantity
-        `,
-        [mutation.quantity, mutation.id]
-      );
-
-      if (updatedResult.rowCount !== 1) {
-        throw new CheckoutValidationError('Inventory changed before checkout could complete');
-      }
-
-      const newStock = Number(updatedResult.rows[0].stock_quantity);
+    const quantityLedgerRows = inventoryMutations.length
+      ? await applyQuantityMovements(domainTransaction, {
+        actorUserId: req.user.id,
+        movements: inventoryMutations.map((mutation) => ({
+          productId: mutation.productId,
+          variantId: mutation.variantId,
+          movementType: 'sold',
+          quantityChange: -mutation.quantity,
+          reason: 'Sale checkout',
+          sourceReference: `checkout:${idempotencyKey}`,
+        })),
+      })
+      : [];
+    for (let index = 0; index < inventoryMutations.length; index += 1) {
+      const mutation = inventoryMutations[index];
+      const newStock = Number(quantityLedgerRows[index].quantity_after);
       if (mutation.previousStock > mutation.threshold && newStock <= mutation.threshold) {
         await createLowStockNotifications(client, {
           productName: mutation.productName,

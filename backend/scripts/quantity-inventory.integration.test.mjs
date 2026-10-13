@@ -70,6 +70,23 @@ test('Phase 3A quantity inventory is atomic, locked, auditable, and rejects seri
       assert.equal(Number((await one(pool, `SELECT stock_quantity FROM product_variants WHERE id=$1`, [variant.id])).stock_quantity), 6);
       assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [variantParent.id])).stock_quantity), 0);
 
+      await withTransaction(pool, (tx) => applyQuantityMovements(tx, {
+        actorUserId: user.id,
+        movements: [
+          { productId: normal.id, movementType: 'sold', quantityChange: -2, sourceReference: 'checkout:test-normal' },
+          { productId: variantParent.id, variantId: variant.id, movementType: 'sold', quantityChange: -1, sourceReference: 'checkout:test-variant' },
+        ],
+      }));
+      await withTransaction(pool, (tx) => applyQuantityMovements(tx, {
+        actorUserId: user.id, requireActive: false, enforceVariantTarget: false,
+        movements: [
+          { productId: normal.id, movementType: 'refunded', quantityChange: 1, sourceReference: 'sale:1:refunded' },
+          { productId: variantParent.id, variantId: variant.id, movementType: 'voided', quantityChange: 1, sourceReference: 'sale:2:voided' },
+        ],
+      }));
+      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [normal.id])).stock_quantity), 7);
+      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM product_variants WHERE id=$1`, [variant.id])).stock_quantity), 6);
+
       await assert.rejects(withTransaction(pool, (tx) => applyQuantityMovements(tx, {
         actorUserId: user.id,
         movements: [
@@ -77,8 +94,8 @@ test('Phase 3A quantity inventory is atomic, locked, auditable, and rejects seri
           { productId: second.id, movementType: 'adjusted', quantityChange: -99 },
         ],
       })), /Insufficient inventory/);
-      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [normal.id])).stock_quantity), 8);
-      assert.equal(Number((await one(pool, `SELECT COUNT(*) AS count FROM inventory_movements WHERE product_id=$1`, [normal.id])).count), 1);
+      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [normal.id])).stock_quantity), 7);
+      assert.equal(Number((await one(pool, `SELECT COUNT(*) AS count FROM inventory_movements WHERE product_id=$1`, [normal.id])).count), 3);
 
       await assert.rejects(withTransaction(pool, (tx) => receiveQuantityInventory(tx, {
         movements: [{ productId: tracked.id, quantity: 1 }],
@@ -90,10 +107,10 @@ test('Phase 3A quantity inventory is atomic, locked, auditable, and rejects seri
           movements: [{ productId: normal.id, quantity: 1, sourceReference: `CONCURRENT-${number}` }],
         })
       )));
-      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [normal.id])).stock_quantity), 12);
+      assert.equal(Number((await one(pool, `SELECT stock_quantity FROM products WHERE id=$1`, [normal.id])).stock_quantity), 11);
       const chain = await pool.query(`SELECT quantity_before,quantity_after FROM inventory_movements WHERE product_id=$1 ORDER BY id`, [normal.id]);
       assert.deepEqual(chain.rows.map((row) => [Number(row.quantity_before), Number(row.quantity_after)]), [
-        [5, 8], [8, 9], [9, 10], [10, 11], [11, 12],
+        [5, 8], [8, 6], [6, 7], [7, 8], [8, 9], [9, 10], [10, 11],
       ]);
       await assert.rejects(pool.query(`UPDATE inventory_movements SET reason='tampered' WHERE product_id=$1`, [normal.id]), /immutable/);
     } finally { await pool.end(); }

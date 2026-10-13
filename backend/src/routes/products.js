@@ -441,6 +441,14 @@ router.post(
       });
     }
 
+    if (Number(stock_quantity || 0) !== 0
+      || variants.some((variant) => Number(variant.stock_quantity || 0) !== 0)) {
+      return res.status(409).json({
+        error: 'Create products with opening stock through the product workflow so inventory movements are recorded',
+        code: 'PRODUCT_WORKFLOW_REQUIRED',
+      });
+    }
+
     const client =
       await pool.connect();
 
@@ -1267,9 +1275,7 @@ router.put(
       const existingProduct =
         existingResult.rows[0];
 
-      const nextStockQuantity = stock_quantity === undefined
-        ? existingProduct.stock_quantity
-        : stock_quantity || 0;
+      const nextStockQuantity = existingProduct.stock_quantity;
 
       if (!existingProduct.is_active) {
         await client.query('ROLLBACK');
@@ -1278,13 +1284,11 @@ router.put(
         });
       }
 
-      if (
-        existingProduct.serial_tracking_enabled === true
-        && Number(nextStockQuantity) !== Number(existingProduct.stock_quantity)
-      ) {
+      if (stock_quantity !== undefined
+        && Number(stock_quantity) !== Number(existingProduct.stock_quantity)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'Stock quantity for serialized inventory must be changed through stock-unit operations',
+          error: 'Stock quantity cannot be edited directly; use Restock or the appropriate inventory workflow',
           code: 'DIRECT_QUANTITY_EDIT_FORBIDDEN',
         });
       }
@@ -1601,13 +1605,10 @@ router.post(
         });
       }
 
-      if (
-        productResult.rows[0].serial_tracking_enabled === true
-        && Number(stock_quantity || 0) !== 0
-      ) {
+      if (Number(stock_quantity || 0) !== 0) {
         return res.status(409).json({
-          error: 'Create serialized variants with zero stock, then receive stock units',
-          code: 'SERIAL_UNIT_REGISTRATION_REQUIRED',
+          error: 'Create variants with zero stock, then use Restock so inventory movements are recorded',
+          code: 'DIRECT_QUANTITY_EDIT_FORBIDDEN',
         });
       }
 
@@ -1765,11 +1766,7 @@ router.put(
           AND pv.product_id = $8
           AND pv.is_active = TRUE
           AND p.id = pv.product_id
-          AND (
-            COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled) = FALSE
-            OR $5::integer IS NULL
-            OR pv.stock_quantity = $5::integer
-          )
+          AND ($5::integer IS NULL OR pv.stock_quantity = $5::integer)
 
         RETURNING pv.*,
                   COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
@@ -1801,7 +1798,7 @@ router.put(
       if (result.rows.length === 0) {
         const current = await pool.query(
           `
-            SELECT pv.id,
+            SELECT pv.id, pv.stock_quantity,
                    COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled)
                      AS effective_serial_tracking_enabled
             FROM product_variants pv
@@ -1810,9 +1807,10 @@ router.put(
           `,
           [req.params.variantId, req.params.id]
         );
-        if (current.rows[0]?.effective_serial_tracking_enabled === true) {
+        if (current.rows[0] && stock_quantity !== undefined
+          && Number(stock_quantity) !== Number(current.rows[0].stock_quantity)) {
           return res.status(409).json({
-            error: 'Stock quantity for serialized inventory must be changed through stock-unit operations',
+            error: 'Stock quantity cannot be edited directly; use Restock or the appropriate inventory workflow',
             code: 'DIRECT_QUANTITY_EDIT_FORBIDDEN',
           });
         }

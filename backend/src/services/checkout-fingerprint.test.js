@@ -331,7 +331,7 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
   const client = {
     async query(sql, values) {
       queries.push({ sql, values });
-      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql === 'BEGIN' || sql === 'COMMIT' || /^SAVEPOINT |^RELEASE SAVEPOINT /.test(sql)) return { rows: [] };
       if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
       if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
       if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
@@ -343,14 +343,22 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
           cost: '50',
           stock_quantity: 10,
           low_stock_threshold: 2,
+          is_active: true,
+          serial_tracking_enabled: false,
+          shop_warranty_enabled: false,
+          shop_warranty_months: null,
         }] };
       }
       if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
         return { rows: [{ count: 0 }] };
       }
+      if (sql.includes('COUNT(*)::integer AS count') && sql.includes('stock_units')) return { rows: [{ count: 0 }] };
       if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: '0.00' }] };
       if (sql.includes('UPDATE products')) {
         return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
+      }
+      if (sql.includes('INSERT INTO inventory_movements')) {
+        return { rows: [{ quantity_before: values[4], quantity_after: values[5] }] };
       }
       if (sql.includes("nextval(")) return { rows: [{ invoice_number: '1' }] };
       if (sql.includes('INSERT INTO sales')) {
@@ -385,6 +393,11 @@ test('valid UUID creates a keyed sale and deducts stock once', async () => {
   });
 
   assert.equal(queries.filter(entry => entry.sql.includes('UPDATE products')).length, 1);
+  const movements = queries.filter(entry => entry.sql.includes('INSERT INTO inventory_movements'));
+  assert.equal(movements.length, 1);
+  assert.deepEqual(movements[0].values.slice(0, 9), [
+    12, null, 'sold', -1, 10, 9, 7, 'Sale checkout', `checkout:${key}`,
+  ]);
   assert.equal(queries.filter(entry => entry.sql.includes('INSERT INTO sales')).length, 1);
   assert.equal(released, true);
 });
@@ -442,18 +455,22 @@ test('duplicate checkout targets create one decrement and one sale item', async 
   const client = {
     async query(sql, values) {
       queries.push({ sql, values });
-      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql === 'BEGIN' || sql === 'COMMIT' || /^SAVEPOINT |^RELEASE SAVEPOINT /.test(sql)) return { rows: [] };
       if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
       if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
       if (sql.includes('FROM products') && sql.includes('FOR UPDATE')) {
         return { rows: [{
           id: 12, name: 'Mouse', sku: 'MOUSE', price: '10.25', cost: '5.00',
-          stock_quantity: 10, low_stock_threshold: 2,
+          stock_quantity: 10, low_stock_threshold: 2, is_active: true,
+          serial_tracking_enabled: false, shop_warranty_enabled: false, shop_warranty_months: null,
         }] };
       }
       if (sql.includes('COUNT(*)::integer AS count')) return { rows: [{ count: 0 }] };
       if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: '0.00' }] };
       if (sql.includes('UPDATE products')) return { rowCount: 1, rows: [{ stock_quantity: 7 }] };
+      if (sql.includes('INSERT INTO inventory_movements')) {
+        return { rows: [{ quantity_before: values[4], quantity_after: values[5] }] };
+      }
       if (sql.includes('nextval(')) return { rows: [{ invoice_number: '2' }] };
       if (sql.includes('INSERT INTO sales')) return { rows: [{ id: 52, invoice_number: 'INV-000002' }] };
       if (sql.includes('INSERT INTO sale_items')) return { rowCount: 1, rows: [] };
@@ -490,7 +507,8 @@ test('duplicate checkout targets create one decrement and one sale item', async 
   const stockUpdates = queries.filter(entry => entry.sql.includes('UPDATE products'));
   const itemInserts = queries.filter(entry => entry.sql.includes('INSERT INTO sale_items'));
   assert.equal(stockUpdates.length, 1);
-  assert.deepEqual(stockUpdates[0].values, [3, 12]);
+  assert.deepEqual(stockUpdates[0].values, [7, 12, 10]);
+  assert.equal(queries.filter(entry => entry.sql.includes('INSERT INTO inventory_movements')).length, 1);
   assert.equal(itemInserts.length, 1);
   assert.equal(itemInserts[0].values[6], 3);
 });
@@ -640,7 +658,7 @@ function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61, 
   const client = {
     async query(sql, values) {
       queries.push({ sql, values });
-      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || /^SAVEPOINT |^RELEASE SAVEPOINT /.test(sql)) return { rows: [] };
       if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
       if (sql.includes('FROM sales') && sql.includes('idempotency_key')) return { rows: [] };
       if (sql.includes('FROM customers')) return { rows: customerRows ?? [] };
@@ -653,14 +671,22 @@ function productSaleClient({ customerRows, paymentMethod = 'cash', saleId = 61, 
           cost: '50',
           stock_quantity: 10,
           low_stock_threshold: 2,
+          is_active: true,
+          serial_tracking_enabled: false,
+          shop_warranty_enabled: false,
+          shop_warranty_months: null,
         }] };
       }
       if (sql.includes('COUNT(*)::integer AS count') && sql.includes('product_variants')) {
         return { rows: [{ count: 0 }] };
       }
+      if (sql.includes('COUNT(*)::integer AS count') && sql.includes('stock_units')) return { rows: [{ count: 0 }] };
       if (sql.includes('FROM store_settings')) return { rows: [{ tax_rate: taxRate }] };
       if (sql.includes('UPDATE products')) {
         return { rowCount: 1, rows: [{ stock_quantity: 9, low_stock_threshold: 2 }] };
+      }
+      if (sql.includes('INSERT INTO inventory_movements')) {
+        return { rows: [{ quantity_before: values[4], quantity_after: values[5] }] };
       }
       if (sql.includes('nextval(')) return { rows: [{ invoice_number: String(saleId) }] };
       if (sql.includes('INSERT INTO sales')) {

@@ -1,3 +1,5 @@
+const { applyQuantityMovements } = require('./quantity-inventory-service');
+
 class SaleReversalError extends Error {
   constructor(message, statusCode) {
     super(message);
@@ -65,7 +67,9 @@ async function revalidateCurrentAdmin(client, userId) {
   return user;
 }
 
-async function restoreExactInventory(client, items) {
+async function restoreExactInventory(transaction, items, {
+  action, saleId, actorUserId, reason = null,
+}) {
   for (const item of items) {
     if (item.variant_id == null && item.product_id == null) {
       throw new SaleReversalError(
@@ -75,44 +79,33 @@ async function restoreExactInventory(client, items) {
     }
   }
 
-  for (const item of items) {
-    let result;
-
-    if (item.variant_id != null) {
-      result = await client.query(
-        `
-          UPDATE product_variants pv
-          SET
-            stock_quantity = pv.stock_quantity + $1,
-            updated_at = NOW()
-          FROM products p
-          WHERE pv.id = $2
-            AND p.id = pv.product_id
-            AND COALESCE(pv.serial_tracking_enabled, p.serial_tracking_enabled) = FALSE
-        `,
-        [item.quantity, item.variant_id]
-      );
-    } else {
-      result = await client.query(
-        `
-          UPDATE products
-          SET
-            stock_quantity = stock_quantity + $1,
-            updated_at = NOW()
-          WHERE id = $2
-            AND serial_tracking_enabled = FALSE
-        `,
-        [item.quantity, item.product_id]
-      );
-    }
-
-    if (result.rowCount !== 1) {
-      throw new SaleReversalError(
-        'Inventory restoration is blocked for serialized or missing inventory; use the serialized return workflow',
-        409
-      );
-    }
+  if (!['refunded', 'voided'].includes(action)) {
+    throw new SaleReversalError('Inventory restoration action is invalid', 400);
   }
+  const aggregated = new Map();
+  for (const item of items) {
+    const productId = Number(item.product_id);
+    const variantId = item.variant_id == null ? null : Number(item.variant_id);
+    const key = `${productId}:${variantId ?? 'null'}`;
+    const existing = aggregated.get(key);
+    aggregated.set(key, {
+      productId, variantId,
+      quantity: Number(item.quantity) + (existing?.quantity || 0),
+    });
+  }
+  return applyQuantityMovements(transaction, {
+    actorUserId,
+    requireActive: false,
+    enforceVariantTarget: false,
+    movements: [...aggregated.values()].map((item) => ({
+      productId: item.productId,
+      variantId: item.variantId,
+      movementType: action,
+      quantityChange: item.quantity,
+      reason,
+      sourceReference: `sale:${saleId}:${action}`,
+    })),
+  });
 }
 
 module.exports = {
