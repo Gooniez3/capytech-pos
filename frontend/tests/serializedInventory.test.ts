@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertCheckoutSelections,
+  advanceCheckoutAttempt,
   checkoutAttemptSignature,
   normalizedSerialKey,
   serialLines,
@@ -52,6 +53,28 @@ test('attempt signatures change with cart or unit selections and remain stable f
   assert.notEqual(checkoutAttemptSignature(attempt), checkoutAttemptSignature({
     ...attempt, warrantyMonths: 12,
   }));
+});
+
+test('checkout attempt changes rotate idempotency state without clearing an active conflict', () => {
+  const conflict = 'Inventory changed. Review the cart before retrying.';
+  assert.deepEqual(advanceCheckoutAttempt({
+    signature: 'attempt-a',
+    idempotencyKey: 'request-key-a',
+    conflictMessage: conflict,
+  }, 'attempt-b'), {
+    signature: 'attempt-b',
+    idempotencyKey: null,
+    conflictMessage: conflict,
+  });
+  assert.deepEqual(advanceCheckoutAttempt({
+    signature: 'attempt-b',
+    idempotencyKey: null,
+    conflictMessage: conflict,
+  }, 'attempt-b'), {
+    signature: 'attempt-b',
+    idempotencyKey: null,
+    conflictMessage: conflict,
+  });
 });
 
 test('saved warranty snapshots distinguish legacy and explicit no-warranty items', () => {

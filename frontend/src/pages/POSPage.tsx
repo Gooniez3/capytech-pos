@@ -60,6 +60,7 @@ import {
 import { api, ApiError } from '@/lib/api';
 import {
   assertCheckoutSelections,
+  advanceCheckoutAttempt,
   checkoutAttemptSignature,
   selectedUnitIds,
   warrantySnapshotLabel,
@@ -961,12 +962,16 @@ const [
   const latestCheckoutAttemptRef = useRef(checkoutAttempt);
   latestCheckoutAttemptRef.current = checkoutAttempt;
   useEffect(() => {
-    if (previousCheckoutAttemptRef.current !== checkoutAttempt) {
-      checkoutKeyRef.current = null;
-      setCheckoutConflict('');
-      previousCheckoutAttemptRef.current = checkoutAttempt;
+    const lifecycle = advanceCheckoutAttempt({
+      signature: previousCheckoutAttemptRef.current,
+      idempotencyKey: checkoutKeyRef.current,
+      conflictMessage: checkoutConflict,
+    }, checkoutAttempt);
+    if (lifecycle.signature !== previousCheckoutAttemptRef.current) {
+      checkoutKeyRef.current = lifecycle.idempotencyKey;
+      previousCheckoutAttemptRef.current = lifecycle.signature;
     }
-  }, [checkoutAttempt]);
+  }, [checkoutAttempt, checkoutConflict]);
 
   useEffect(() => {
     setSelectedStockUnits((current) => {

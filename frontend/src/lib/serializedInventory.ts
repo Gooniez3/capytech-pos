@@ -80,6 +80,22 @@ export function checkoutAttemptSignature(input: unknown): string {
   return JSON.stringify(input);
 }
 
+export function advanceCheckoutAttempt(
+  current: {
+    signature: string;
+    idempotencyKey: string | null;
+    conflictMessage: string;
+  },
+  nextSignature: string
+) {
+  if (current.signature === nextSignature) return current;
+  return {
+    signature: nextSignature,
+    idempotencyKey: null,
+    conflictMessage: current.conflictMessage,
+  };
+}
+
 export function warrantySnapshotLabel(item: {
   shopWarrantyEligible?: boolean | null;
   shopWarrantyMonths?: number | null;

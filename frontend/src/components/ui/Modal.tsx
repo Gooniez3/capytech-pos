@@ -1,6 +1,21 @@
-import type { ReactNode } from 'react';
-import { useEffect } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+
+let openModalCount = 0;
+let originalBodyOverflow = '';
+
+function isTopModal(host: HTMLDivElement) {
+  const roots = document.querySelectorAll<HTMLDivElement>('[data-modal-root]');
+  return roots[roots.length - 1] === host;
+}
+
+function focusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => !element.hasAttribute('hidden'));
+}
 
 interface ModalProps {
   open: boolean;
@@ -37,39 +52,77 @@ export function Modal({
   size = 'md',
   compactMobile = false,
 }: ModalProps) {
+  const [portalHost, setPortalHost] = useState<HTMLDivElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+
   useEffect(() => {
     if (!open) return;
 
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const host = document.createElement('div');
+    host.dataset.modalRoot = '';
+    document.body.appendChild(host);
+    setPortalHost(host);
 
-    document.addEventListener(
-      'keydown',
-      handler
-    );
-
-    document.body.style.overflow =
-      'hidden';
+    if (openModalCount === 0) {
+      originalBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    }
+    openModalCount += 1;
 
     return () => {
-      document.removeEventListener(
-        'keydown',
-        handler
-      );
-
-      document.body.style.overflow = '';
+      host.remove();
+      openModalCount = Math.max(0, openModalCount - 1);
+      if (openModalCount === 0) document.body.style.overflow = originalBodyOverflow;
+      requestAnimationFrame(() => {
+        if (previouslyFocused?.isConnected) previouslyFocused.focus();
+      });
     };
-  }, [open, onClose]);
+  }, [open]);
 
-  if (!open) {
+  useEffect(() => {
+    if (!portalHost) return;
+    const frame = requestAnimationFrame(() => dialogRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [portalHost]);
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!portalHost || !isTopModal(portalHost)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab' || !dialogRef.current) return;
+    const focusable = focusableElements(dialogRef.current);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialogRef.current.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  if (!open || !portalHost) {
     return null;
   }
 
-  return (
+  return createPortal(
     <div
+      onKeyDown={handleKeyDown}
       className={`
         fixed
         inset-0
@@ -87,6 +140,7 @@ export function Modal({
     >
       {/* Backdrop */}
       <div
+        data-modal-backdrop
         className="
           absolute
           inset-0
@@ -99,6 +153,12 @@ export function Modal({
 
       {/* Modal */}
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        aria-describedby={description ? descriptionId : undefined}
+        tabIndex={-1}
         className={`
           relative
           flex
@@ -162,6 +222,7 @@ export function Modal({
             <div className="min-w-0">
               {title && (
                 <h2
+                  id={titleId}
                   className={`
                     font-bold
                     text-slate-900
@@ -179,6 +240,7 @@ export function Modal({
 
               {description && (
                 <p
+                  id={descriptionId}
                   className={`
                     mt-0.5
                     text-slate-500
@@ -285,6 +347,7 @@ export function Modal({
   </div>
 )}
       </div>
-    </div>
+    </div>,
+    portalHost
   );
 }
