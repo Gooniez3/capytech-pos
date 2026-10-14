@@ -938,11 +938,11 @@ export function InvoicePage() {
                           <p><span className="font-bold">Coverage:</span>{' '}{item.shopWarrantyStartDate} to {item.shopWarrantyEndDate}</p>
                         )}
                         {(item.stockUnits || []).map((unit) => (
-                          <p key={unit.id} className="break-all font-mono">
-                            <span className="font-sans font-bold">SN:</span>{' '}{unit.serialNumber}{' · '}
-                            <span className="font-sans font-bold">Unit:</span>{' '}{unit.internalSku}
-                          </p>
-                        ))}
+  <p key={unit.id} className="break-all font-mono">
+    <span className="font-sans font-bold">Serial Number:</span>{' '}
+    {unit.serialNumber}
+  </p>
+))}
                       </div>
 
                     </td>
