@@ -9,6 +9,9 @@ import { UP_SQL as P08 } from '../migrations/1788652800003_p08-product-recycle-b
 import { UP_SQL as P10 } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 import { UP_SQL as P2B } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
 import { UP_SQL as P3A } from '../migrations/1791849600000_p3a-inventory-movements.mjs';
+import { UP_SQL as P3D } from '../migrations/1791936000000_p3d-inventory-receipts.mjs';
+import { UP_SQL as CT } from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
+import { UP_SQL as CP } from '../migrations/1792108800000_cp-catalog-codes.mjs';
 
 const require = createRequire(import.meta.url);
 const { withTransaction } = require('../src/services/domain-transaction');
@@ -59,6 +62,9 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       await bootstrap.query(P10);
       await bootstrap.query(P2B);
       await bootstrap.query(P3A);
+      await bootstrap.query(P3D);
+      await bootstrap.query(CT);
+      await bootstrap.query(CP);
       await bootstrap.query('COMMIT');
     } finally { await bootstrap.end(); }
 
@@ -90,39 +96,72 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       const category = await one(pool, `INSERT INTO categories (name) VALUES ('P2E') RETURNING id`);
       const tracked = await one(pool, `
         INSERT INTO products
-          (sku, name, category_id, price, cost, stock_quantity,
+          (sku, product_code, name, category_id, price, cost, stock_quantity,
            serial_tracking_enabled, shop_warranty_enabled, shop_warranty_months)
-        VALUES ('P2E-SERIAL', 'Serialized Laptop', $1, 1000, 600, 0, TRUE, TRUE, 3)
+        VALUES (
+          'P2E-SERIAL',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          'Serialized Laptop', $1, 1000, 600, 0, TRUE, TRUE, 3
+        )
         RETURNING id
       `, [category.id]);
       const exhaustedTracked = await one(pool, `
         INSERT INTO products
-          (sku, name, category_id, price, cost, stock_quantity,
+          (sku, product_code, name, category_id, price, cost, stock_quantity,
            serial_tracking_enabled, shop_warranty_enabled)
-        VALUES ('P2E-EXHAUSTED', 'Single Serialized Unit', $1, 500, 300, 0, TRUE, FALSE)
+        VALUES (
+          'P2E-EXHAUSTED',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          'Single Serialized Unit', $1, 500, 300, 0, TRUE, FALSE
+        )
         RETURNING id
       `, [category.id]);
       const untracked = await one(pool, `
-        INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
-        VALUES ('P2E-CABLE', 'Cable', $1, 100, 40, 10) RETURNING id
+        INSERT INTO products
+          (sku, product_code, name, category_id, price, cost, stock_quantity)
+        VALUES (
+          'P2E-CABLE',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          'Cable', $1, 100, 40, 10
+        ) RETURNING id
       `, [category.id]);
       const legacyProduct = await one(pool, `
-        INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
-        VALUES ('P2E-LEGACY', 'Legacy Checkout Test', $1, 200, 80, 5)
+        INSERT INTO products
+          (sku, product_code, name, category_id, price, cost, stock_quantity)
+        VALUES (
+          'P2E-LEGACY',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          'Legacy Checkout Test', $1, 200, 80, 5
+        )
         RETURNING id
       `, [category.id]);
       const variantParent = await one(pool, `
         INSERT INTO products
-          (sku, name, category_id, price, cost, stock_quantity, serial_tracking_enabled)
-        VALUES ('P2E-PHONE', 'Variant Phone', $1, 800, 500, 0, TRUE) RETURNING id
+          (sku, product_code, name, category_id, price, cost, stock_quantity,
+           serial_tracking_enabled)
+        VALUES (
+          'P2E-PHONE',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          'Variant Phone', $1, 800, 500, 0, TRUE
+        ) RETURNING id
       `, [category.id]);
       const variantA = await one(pool, `
-        INSERT INTO product_variants (product_id, name, sku, price, cost, stock_quantity)
-        VALUES ($1, 'Black', 'P2E-PHONE-BLK', 800, 500, 0) RETURNING id
+        INSERT INTO product_variants
+          (product_id, name, sku, product_code, price, cost, stock_quantity)
+        VALUES (
+          $1, 'Black', 'P2E-PHONE-BLK',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          800, 500, 0
+        ) RETURNING id
       `, [variantParent.id]);
       const variantB = await one(pool, `
-        INSERT INTO product_variants (product_id, name, sku, price, cost, stock_quantity)
-        VALUES ($1, 'White', 'P2E-PHONE-WHT', 800, 500, 0) RETURNING id
+        INSERT INTO product_variants
+          (product_id, name, sku, product_code, price, cost, stock_quantity)
+        VALUES (
+          $1, 'White', 'P2E-PHONE-WHT',
+          format_catalog_code(nextval('catalog_code_seq'::regclass)),
+          800, 500, 0
+        ) RETURNING id
       `, [variantParent.id]);
       const units = await withTransaction(pool, (transaction) => registerReceivedUnits(transaction, {
         actorUserId: admin.id,
