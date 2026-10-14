@@ -82,22 +82,22 @@ export default async function globalSetup() {
     const categoryId = category.rows[0].id;
     await client.query(`
       INSERT INTO products
-        (sku, name, category_id, price, cost, stock_quantity, low_stock_threshold,
+        (sku, product_code, name, category_id, price, cost, stock_quantity, low_stock_threshold,
          is_active, serial_tracking_enabled, shop_warranty_enabled, shop_warranty_months)
       VALUES
-        ('E2E-SERIAL', 'E2E Serialized Device', $1, 150000, 100000, 2, 1, TRUE, FALSE, FALSE, NULL),
-        ('E2E-WARRANTY', 'E2E Warranty Device', $1, 80000, 50000, 5, 1, TRUE, FALSE, FALSE, NULL),
-        ('E2E-NORMAL', 'E2E Normal Item', $1, 20000, 10000, 5, 1, TRUE, FALSE, FALSE, NULL),
-        ('E2E-VARIANT', 'E2E Variant Device', $1, 60000, 40000, 0, 1, TRUE, FALSE, TRUE, 3)
+        ('E2E-SERIAL', format_catalog_code(nextval('catalog_code_seq'::regclass)), 'E2E Serialized Device', $1, 150000, 100000, 2, 1, TRUE, FALSE, FALSE, NULL),
+        ('E2E-WARRANTY', format_catalog_code(nextval('catalog_code_seq'::regclass)), 'E2E Warranty Device', $1, 80000, 50000, 5, 1, TRUE, FALSE, FALSE, NULL),
+        ('E2E-NORMAL', format_catalog_code(nextval('catalog_code_seq'::regclass)), 'E2E Normal Item', $1, 20000, 10000, 5, 1, TRUE, FALSE, FALSE, NULL),
+        ('E2E-VARIANT', format_catalog_code(nextval('catalog_code_seq'::regclass)), 'E2E Variant Device', $1, 60000, 40000, 0, 1, TRUE, FALSE, TRUE, 3)
     `, [categoryId]);
     const parent = await client.query(`SELECT id FROM products WHERE sku = 'E2E-VARIANT'`);
     await client.query(`
       INSERT INTO product_variants
-        (product_id, name, sku, price, cost, stock_quantity, low_stock_threshold,
+        (product_id, name, sku, product_code, price, cost, stock_quantity, low_stock_threshold,
          is_active, serial_tracking_enabled, shop_warranty_enabled, shop_warranty_months)
       VALUES
-        ($1, 'Red', 'E2E-VAR-RED', 65000, 42000, 1, 1, TRUE, NULL, NULL, NULL),
-        ($1, 'Blue', 'E2E-VAR-BLUE', 70000, 45000, 1, 1, TRUE, FALSE, FALSE, NULL)
+        ($1, 'Red', 'E2E-VAR-RED', format_catalog_code(nextval('catalog_code_seq'::regclass)), 65000, 42000, 1, 1, TRUE, NULL, NULL, NULL),
+        ($1, 'Blue', 'E2E-VAR-BLUE', format_catalog_code(nextval('catalog_code_seq'::regclass)), 70000, 45000, 1, 1, TRUE, FALSE, FALSE, NULL)
     `, [parent.rows[0].id]);
     await client.query(`
       INSERT INTO store_settings (store_name, phone, email, address, currency, tax_rate)
