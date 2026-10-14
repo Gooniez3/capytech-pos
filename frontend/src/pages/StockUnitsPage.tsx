@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Barcode, RefreshCw, Search, ShieldCheck } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import {
   WARRANTY_MONTHS,
   type InventoryPolicy,
@@ -28,6 +29,21 @@ interface StockUnitDetails extends StockUnitSummary {
   history: Array<{ id: number | string; event_type: string; from_state: string | null; to_state: string; actor_username: string | null; reason: string | null; occurred_at: string }>;
 }
 interface StockPage { items: StockUnitSummary[]; pagination: { page: number; limit: number; total: number; pages: number } }
+
+type StockUnitConfirmation =
+  | {
+      type: 'release' | 'retire';
+      unitId: number | string;
+      unitCode: string;
+      expectedState: StockUnitState;
+    }
+  | {
+      type: 'correct-serial';
+      unitId: number | string;
+      unitCode: string;
+      expectedSerial: string;
+      proposedSerial: string;
+    };
 
 const stateStyles: Record<StockUnitState, string> = {
   available: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -56,6 +72,8 @@ export function StockUnitsPage() {
   const [reason, setReason] = useState('');
   const [correctedSerial, setCorrectedSerial] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmation, setConfirmation] = useState<StockUnitConfirmation | null>(null);
+  const confirmationBusyRef = useRef(false);
   const [policyProduct, setPolicyProduct] = useState('');
   const [policyVariant, setPolicyVariant] = useState('');
   const [serialSetting, setSerialSetting] = useState<'inherit' | 'on' | 'off'>('off');
@@ -195,26 +213,115 @@ export function StockUnitsPage() {
     }
   }
 
-  async function lifecycle(action: 'release' | 'retire') {
-    if (!selected || !admin || !window.confirm(`${action === 'retire' ? 'Retire' : 'Release'} ${selected.unit_code}?`)) return;
-    setBusy(true);
-    try {
-      await api.post(`/api/stock-units/${action}`, { unit_ids: [selected.id], reason: reason.trim() || null });
-      toast(`Stock unit ${action === 'retire' ? 'retired' : 'released'}.`, 'success'); setSelected(null); setReason(''); await loadUnits();
-    } catch (error) { toast(error instanceof Error ? error.message : `Failed to ${action} unit.`, 'error'); }
-    finally { setBusy(false); }
+  function lifecycle(action: 'release' | 'retire') {
+    if (!selected || !admin || busy) return;
+    setConfirmation({
+      type: action,
+      unitId: selected.id,
+      unitCode: selected.unit_code,
+      expectedState: selected.state,
+    });
   }
 
-  async function correctSerial() {
-    if (!selected || !admin || !correctedSerial.trim()) return;
-    if (!window.confirm(`Retire ${selected.unit_code} and create a replacement with a new permanent CT identity and serial “${correctedSerial.trim()}”? The old serial and CT code remain reserved.`)) return;
+  function correctSerial() {
+    const proposedSerial = correctedSerial.trim();
+    if (!selected || !admin || !proposedSerial || busy) return;
+    setConfirmation({
+      type: 'correct-serial',
+      unitId: selected.id,
+      unitCode: selected.unit_code,
+      expectedSerial: selected.manufacturer_serial_number,
+      proposedSerial,
+    });
+  }
+
+  function cancelConfirmation() {
+    if (confirmationBusyRef.current) return;
+    setConfirmation(null);
+  }
+
+  async function confirmStockUnitAction() {
+    if (!confirmation || confirmationBusyRef.current || !admin) return;
+
+    const action = confirmation;
+    const sameUnit = selected
+      && String(selected.id) === String(action.unitId)
+      && selected.unit_code === action.unitCode;
+    const validTarget = sameUnit && (
+      action.type === 'correct-serial'
+        ? selected.state === 'available'
+          && selected.manufacturer_serial_number === action.expectedSerial
+          && correctedSerial.trim() === action.proposedSerial
+        : selected.state === action.expectedState
+          && (action.type === 'release'
+            ? selected.state === 'quarantined'
+            : selected.state === 'available' || selected.state === 'quarantined')
+    );
+
+    if (!validTarget) {
+      setConfirmation(null);
+      toast(
+        'The selected stock unit changed. Review its current CT identity and try again.',
+        'warning'
+      );
+      return;
+    }
+
+    confirmationBusyRef.current = true;
     setBusy(true);
     try {
-      await api.patch(`/api/stock-units/${selected.id}/serial`, { serial_number: correctedSerial.trim(), reason: reason.trim() || 'serial correction' });
-      toast('Original unit retired; replacement created with a new SU- identity.', 'success'); setSelected(null); setCorrectedSerial(''); setReason(''); await loadUnits();
-    } catch (error) { toast(error instanceof Error ? error.message : 'Failed to correct serial.', 'error'); }
-    finally { setBusy(false); }
+      if (action.type === 'correct-serial') {
+        await api.patch(`/api/stock-units/${action.unitId}/serial`, {
+          serial_number: action.proposedSerial,
+          reason: reason.trim() || 'serial correction',
+        });
+        toast('Original unit retired; replacement created with a new SU- identity.', 'success');
+        setCorrectedSerial('');
+      } else {
+        await api.post(`/api/stock-units/${action.type}`, {
+          unit_ids: [action.unitId],
+          reason: reason.trim() || null,
+        });
+        toast(`Stock unit ${action.type === 'retire' ? 'retired' : 'released'}.`, 'success');
+      }
+
+      setConfirmation(null);
+      setSelected(null);
+      setReason('');
+      await loadUnits();
+    } catch (error) {
+      const fallback = action.type === 'correct-serial'
+        ? 'Failed to correct serial.'
+        : `Failed to ${action.type} unit.`;
+      toast(error instanceof Error ? error.message : fallback, 'error');
+    } finally {
+      confirmationBusyRef.current = false;
+      setBusy(false);
+    }
   }
+
+  const confirmationContent = confirmation?.type === 'release'
+    ? {
+        title: `Release ${confirmation.unitCode}?`,
+        description: 'This quarantined unit will return to available inventory and can be sold again.',
+        confirmLabel: 'Release to available',
+        variant: 'warning' as const,
+      }
+    : confirmation?.type === 'retire'
+      ? {
+          title: `Permanently retire ${confirmation.unitCode}?`,
+          description: 'This unit will be permanently retired and cannot return to available inventory. Its identity and history remain reserved.',
+          confirmLabel: 'Retire permanently',
+          variant: 'danger' as const,
+        }
+      : confirmation?.type === 'correct-serial'
+        ? {
+            title: `Correct serial for ${confirmation.unitCode}?`,
+            description: `${confirmation.unitCode} will be permanently retired and replaced using serial "${confirmation.proposedSerial}". The original CT code, serial, and identity remain reserved and cannot be reused.`,
+            confirmLabel: 'Retire & replace',
+            variant: 'danger' as const,
+          }
+        : null;
 
   return <div className="space-y-5">
     <PageHeader title="Stock Units" subtitle="Serialized inventory, lifecycle history, and shop warranty policies" />
@@ -252,5 +359,16 @@ export function StockUnitsPage() {
     <Modal open={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.unit_code || 'Stock unit'} description={selected ? `${selected.product_name}${selected.variant_name ? ` · ${selected.variant_name}` : ''}` : undefined}>
       {selected && <div className="space-y-4"><div className="rounded-xl bg-slate-50 p-4 text-sm"><p><strong>Manufacturer SN:</strong> <span className="break-all font-mono">{selected.manufacturer_serial_number}</span></p><p><strong>State:</strong> {selected.state}</p>{selected.invoice_number && <p><strong>Sale:</strong> {selected.invoice_number} ({selected.sale_status})</p>}</div><div><h3 className="mb-2 font-bold">Immutable history</h3><div className="max-h-52 space-y-2 overflow-y-auto">{selected.history.map((event) => <div key={event.id} className="border-l-2 border-slate-300 pl-3 text-sm"><p className="font-semibold">{event.event_type}: {event.from_state || 'new'} → {event.to_state}</p><p className="text-xs text-slate-500">{new Date(event.occurred_at).toLocaleString()} · {event.actor_username || 'system'}{event.reason ? ` · ${event.reason}` : ''}</p></div>)}</div></div>{admin && <><input className="h-10 w-full rounded-lg border border-slate-200 px-3" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason / audit note" />{selected.state === 'available' && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="mb-2 text-sm font-semibold text-amber-900">Serial correction retires this unit and creates a replacement with a new internal SU- identity. It never edits historical identity, and the old serial remains reserved.</p><div className="flex gap-2"><input className="h-10 flex-1 rounded-lg border border-amber-300 px-3 font-mono" value={correctedSerial} onChange={(e) => setCorrectedSerial(e.target.value)} placeholder="Correct manufacturer serial" /><Button disabled={busy || !correctedSerial.trim()} onClick={correctSerial}>Retire & replace</Button></div></div>}<div className="flex justify-end gap-2">{selected.state === 'quarantined' && <Button onClick={() => lifecycle('release')}>Release to available</Button>}{(selected.state === 'available' || selected.state === 'quarantined') && <Button variant="danger" leftIcon={<Archive className="h-4 w-4" />} onClick={() => lifecycle('retire')}>Retire unit</Button>}</div></>}</div>}
     </Modal>
+    {confirmationContent && <ConfirmDialog
+      open={Boolean(confirmation)}
+      title={confirmationContent.title}
+      description={confirmationContent.description}
+      confirmLabel={confirmationContent.confirmLabel}
+      cancelLabel="Cancel"
+      variant={confirmationContent.variant}
+      busy={busy}
+      onConfirm={confirmStockUnitAction}
+      onCancel={cancelConfirmation}
+    />}
   </div>;
 }
