@@ -1,4 +1,4 @@
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from 'react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
@@ -33,6 +33,8 @@ interface ModalProps {
    * Desktop remains unchanged.
    */
   compactMobile?: boolean;
+  dismissible?: boolean;
+  initialFocusRef?: RefObject<HTMLElement>;
 }
 
 const sizeClasses = {
@@ -51,6 +53,8 @@ export function Modal({
   footer,
   size = 'md',
   compactMobile = false,
+  dismissible = true,
+  initialFocusRef,
 }: ModalProps) {
   const [portalHost, setPortalHost] = useState<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -86,16 +90,18 @@ export function Modal({
 
   useEffect(() => {
     if (!portalHost) return;
-    const frame = requestAnimationFrame(() => dialogRef.current?.focus());
+    const frame = requestAnimationFrame(() => {
+      (initialFocusRef?.current || dialogRef.current)?.focus();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [portalHost]);
+  }, [initialFocusRef, portalHost]);
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!portalHost || !isTopModal(portalHost)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      onClose();
+      if (dismissible) onClose();
       return;
     }
     if (event.key !== 'Tab' || !dialogRef.current) return;
@@ -148,7 +154,7 @@ export function Modal({
           backdrop-blur-sm
           animate-fade-in
         "
-        onClick={onClose}
+        onClick={dismissible ? onClose : undefined}
       />
 
       {/* Modal */}
@@ -260,6 +266,7 @@ export function Modal({
             <button
               type="button"
               onClick={onClose}
+              disabled={!dismissible}
               className="
                 shrink-0
                 rounded-lg
@@ -268,6 +275,8 @@ export function Modal({
                 transition-colors
                 hover:bg-slate-100
                 hover:text-slate-600
+                disabled:cursor-not-allowed
+                disabled:opacity-40
               "
               aria-label="Close modal"
             >
