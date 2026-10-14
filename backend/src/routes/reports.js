@@ -4,30 +4,19 @@ const {
   requireAuth,
   requireAdmin,
 } = require('../middleware/auth');
+const {
+  ReportPeriodError,
+  resolveReportPeriod,
+} = require('../services/report-period');
 
 const router = express.Router();
 
-/* =========================================================
-   DATE RANGE HELPERS
-   ========================================================= */
-
-function getRangeStart(range) {
-  switch (range) {
-    case 'today':
-      return "CURRENT_DATE";
-
-    case 'week':
-      return "CURRENT_DATE - INTERVAL '6 days'";
-
-    case 'month':
-      return "CURRENT_DATE - INTERVAL '29 days'";
-
-    case 'year':
-      return "DATE_TRUNC('year', CURRENT_DATE)";
-
-    default:
-      return "CURRENT_DATE - INTERVAL '29 days'";
+function reportError(res, error, fallback) {
+  if (error instanceof ReportPeriodError) {
+    return res.status(error.status).json({ error: error.message });
   }
+  console.error(fallback, error);
+  return res.status(500).json({ error: fallback });
 }
 
 /* =========================================================
@@ -39,14 +28,8 @@ router.get(
   requireAuth,
   requireAdmin,
   async (req, res) => {
-    const range = String(
-      req.query.range || 'month'
-    );
-
-    const rangeStart =
-      getRangeStart(range);
-
     try {
+      const period = await resolveReportPeriod(pool, req.query);
       // ---------------------------------
       // 1. Gross sales + transaction data
       // ---------------------------------
@@ -81,9 +64,9 @@ router.get(
         'completed',
         'refunded'
       )
-      AND created_at::date >=
-        ${rangeStart}
-  `);
+      AND created_at >= $1::date
+      AND created_at < ($2::date + INTERVAL '1 day')
+  `, period.values);
       // ---------------------------------
       // 2. Gross COGS + gross units sold
       // ---------------------------------
@@ -113,9 +96,9 @@ router.get(
               'completed',
               'refunded'
             )
-            AND s.created_at::date >=
-              ${rangeStart}
-        `);
+            AND s.created_at >= $1::date
+            AND s.created_at < ($2::date + INTERVAL '1 day')
+        `, period.values);
 
       // ---------------------------------
       // 3. Refund amount
@@ -141,9 +124,9 @@ router.get(
           WHERE
             status = 'refunded'
             AND refunded_at IS NOT NULL
-            AND refunded_at::date >=
-              ${rangeStart}
-        `);
+            AND refunded_at >= $1::date
+            AND refunded_at < ($2::date + INTERVAL '1 day')
+        `, period.values);
 
       // ---------------------------------
       // 4. Refunded COGS
@@ -173,9 +156,9 @@ router.get(
           WHERE
             s.status = 'refunded'
             AND s.refunded_at IS NOT NULL
-            AND s.refunded_at::date >=
-              ${rangeStart}
-        `);
+            AND s.refunded_at >= $1::date
+            AND s.refunded_at < ($2::date + INTERVAL '1 day')
+        `, period.values);
 
       // ---------------------------------
       // 5. Calculate final report values
@@ -305,15 +288,7 @@ const refundRate =
         refundRate,
       });
     } catch (err) {
-      console.error(
-        'Reports summary error:',
-        err
-      );
-
-      res.status(500).json({
-        error:
-          'Failed to load report summary',
-      });
+      reportError(res, err, 'Failed to load report summary');
     }
   }
 );
@@ -327,16 +302,13 @@ router.get(
   requireAuth,
   requireAdmin,
   async (req, res) => {
-    const range = String(
-      req.query.range || 'month'
-    );
-
     try {
+      const period = await resolveReportPeriod(pool, req.query);
       /* =====================================================
          TODAY → HOURLY
          ===================================================== */
 
-      if (range === 'today') {
+      if (period.trendGrain === 'hourly') {
   const result =
     await pool.query(`
       WITH hours AS (
@@ -370,8 +342,8 @@ router.get(
             'completed',
             'refunded'
           )
-          AND created_at::date =
-            CURRENT_DATE
+          AND created_at >= $1::date
+          AND created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           EXTRACT(
@@ -400,8 +372,8 @@ router.get(
         WHERE
           status = 'refunded'
           AND refunded_at IS NOT NULL
-          AND refunded_at::date =
-            CURRENT_DATE
+          AND refunded_at >= $1::date
+          AND refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           EXTRACT(
@@ -433,8 +405,8 @@ router.get(
             'completed',
             'refunded'
           )
-          AND s.created_at::date =
-            CURRENT_DATE
+          AND s.created_at >= $1::date
+          AND s.created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           EXTRACT(
@@ -464,8 +436,8 @@ router.get(
         WHERE
           s.status = 'refunded'
           AND s.refunded_at IS NOT NULL
-          AND s.refunded_at::date =
-            CURRENT_DATE
+          AND s.refunded_at >= $1::date
+          AND s.refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           EXTRACT(
@@ -558,15 +530,13 @@ router.get(
 
       ORDER BY
         hours.hour
-    `);
+    `, period.values);
 
   return res.json(
     result.rows.map(
       (row) => ({
         date:
-          `${new Date()
-            .toISOString()
-            .slice(0, 10)}T${String(
+          `${period.from}T${String(
             row.hour
           ).padStart(
             2,
@@ -599,16 +569,15 @@ router.get(
          7 DAYS → DAILY
          ===================================================== */
 
-      if (range === 'week') {
+      if (period.trendGrain === 'daily-week') {
   const result =
     await pool.query(`
       WITH days AS (
         SELECT
           generate_series(
-            CURRENT_DATE -
-              INTERVAL '6 days',
+            $1::date,
 
-            CURRENT_DATE,
+            $2::date,
 
             INTERVAL '1 day'
           )::date AS day
@@ -636,9 +605,8 @@ router.get(
             'refunded'
           )
 
-          AND created_at::date >=
-            CURRENT_DATE -
-              INTERVAL '6 days'
+          AND created_at >= $1::date
+          AND created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           created_at::date
@@ -665,9 +633,8 @@ router.get(
 
           AND refunded_at IS NOT NULL
 
-          AND refunded_at::date >=
-            CURRENT_DATE -
-              INTERVAL '6 days'
+          AND refunded_at >= $1::date
+          AND refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           refunded_at::date
@@ -696,9 +663,8 @@ router.get(
             'refunded'
           )
 
-          AND s.created_at::date >=
-            CURRENT_DATE -
-              INTERVAL '6 days'
+          AND s.created_at >= $1::date
+          AND s.created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           s.created_at::date
@@ -726,9 +692,8 @@ router.get(
 
           AND s.refunded_at IS NOT NULL
 
-          AND s.refunded_at::date >=
-            CURRENT_DATE -
-              INTERVAL '6 days'
+          AND s.refunded_at >= $1::date
+          AND s.refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           s.refunded_at::date
@@ -818,7 +783,7 @@ router.get(
 
       ORDER BY
         days.day
-    `);
+    `, period.values);
 
   return res.json(
     result.rows.map(
@@ -852,16 +817,15 @@ router.get(
    30 DAYS → DAILY
    ===================================================== */
 
-if (range === 'month') {
+if (period.trendGrain === 'daily') {
   const result =
     await pool.query(`
       WITH days AS (
         SELECT
           generate_series(
-            CURRENT_DATE -
-              INTERVAL '29 days',
+            $1::date,
 
-            CURRENT_DATE,
+            $2::date,
 
             INTERVAL '1 day'
           )::date AS day
@@ -889,9 +853,8 @@ if (range === 'month') {
             'refunded'
           )
 
-          AND created_at::date >=
-            CURRENT_DATE -
-              INTERVAL '29 days'
+          AND created_at >= $1::date
+          AND created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           created_at::date
@@ -918,9 +881,8 @@ if (range === 'month') {
 
           AND refunded_at IS NOT NULL
 
-          AND refunded_at::date >=
-            CURRENT_DATE -
-              INTERVAL '29 days'
+          AND refunded_at >= $1::date
+          AND refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           refunded_at::date
@@ -949,9 +911,8 @@ if (range === 'month') {
             'refunded'
           )
 
-          AND s.created_at::date >=
-            CURRENT_DATE -
-              INTERVAL '29 days'
+          AND s.created_at >= $1::date
+          AND s.created_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           s.created_at::date
@@ -979,9 +940,8 @@ if (range === 'month') {
 
           AND s.refunded_at IS NOT NULL
 
-          AND s.refunded_at::date >=
-            CURRENT_DATE -
-              INTERVAL '29 days'
+          AND s.refunded_at >= $1::date
+          AND s.refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           s.refunded_at::date
@@ -1071,7 +1031,7 @@ if (range === 'month') {
 
       ORDER BY
         days.day
-    `);
+    `, period.values);
 
   return res.json(
     result.rows.map(
@@ -1112,12 +1072,12 @@ const result =
         generate_series(
           DATE_TRUNC(
             'year',
-            CURRENT_DATE
+            $1::date
           ),
 
           DATE_TRUNC(
             'year',
-            CURRENT_DATE
+            $1::date
           ) +
             INTERVAL '11 months',
 
@@ -1150,18 +1110,8 @@ const result =
           'refunded'
         )
 
-        AND created_at >=
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          )
-
-        AND created_at <
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          ) +
-            INTERVAL '1 year'
+        AND created_at >= $1::date
+        AND created_at < ($2::date + INTERVAL '1 day')
 
       GROUP BY
         DATE_TRUNC(
@@ -1194,18 +1144,8 @@ const result =
 
         AND refunded_at IS NOT NULL
 
-        AND refunded_at >=
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          )
-
-        AND refunded_at <
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          ) +
-            INTERVAL '1 year'
+        AND refunded_at >= $1::date
+        AND refunded_at < ($2::date + INTERVAL '1 day')
 
       GROUP BY
         DATE_TRUNC(
@@ -1240,18 +1180,8 @@ const result =
           'refunded'
         )
 
-        AND s.created_at >=
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          )
-
-        AND s.created_at <
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          ) +
-            INTERVAL '1 year'
+        AND s.created_at >= $1::date
+        AND s.created_at < ($2::date + INTERVAL '1 day')
 
       GROUP BY
         DATE_TRUNC(
@@ -1285,18 +1215,8 @@ const result =
 
         AND s.refunded_at IS NOT NULL
 
-        AND s.refunded_at >=
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          )
-
-        AND s.refunded_at <
-          DATE_TRUNC(
-            'year',
-            CURRENT_DATE
-          ) +
-            INTERVAL '1 year'
+        AND s.refunded_at >= $1::date
+        AND s.refunded_at < ($2::date + INTERVAL '1 day')
 
       GROUP BY
         DATE_TRUNC(
@@ -1389,7 +1309,7 @@ const result =
 
     ORDER BY
       months.month
-  `);
+  `, period.values);
 
 return res.json(
   result.rows.map(
@@ -1418,15 +1338,7 @@ return res.json(
   )
 );
     } catch (err) {
-      console.error(
-        'Sales trend error:',
-        err
-      );
-
-      res.status(500).json({
-        error:
-          'Failed to load sales trend',
-      });
+      reportError(res, err, 'Failed to load sales trend');
     }
   }
 );
@@ -1440,13 +1352,6 @@ router.get(
   requireAuth,
   requireAdmin,
   async (req, res) => {
-    const range = String(
-      req.query.range || 'month'
-    );
-
-    const rangeStart =
-      getRangeStart(range);
-
     const limit =
       Math.min(
         Number(
@@ -1456,6 +1361,7 @@ router.get(
       );
 
     try {
+      const period = await resolveReportPeriod(pool, req.query);
       const result =
         await pool.query(
           `
@@ -1503,8 +1409,8 @@ router.get(
                 'refunded'
               )
 
-              AND s.created_at::date >=
-                ${rangeStart}
+              AND s.created_at >= $1::date
+              AND s.created_at < ($2::date + INTERVAL '1 day')
 
 
             UNION ALL
@@ -1553,9 +1459,8 @@ router.get(
               AND s.refunded_at
                 IS NOT NULL
 
-              AND
-                s.refunded_at::date >=
-                  ${rangeStart}
+              AND s.refunded_at >= $1::date
+              AND s.refunded_at < ($2::date + INTERVAL '1 day')
           ),
 
           totals AS (
@@ -1610,9 +1515,9 @@ router.get(
             revenue DESC,
             units DESC
 
-          LIMIT $1
+          LIMIT $3
           `,
-          [limit]
+          [...period.values, limit]
         );
 
       res.json(
@@ -1664,15 +1569,7 @@ router.get(
         )
       );
     } catch (err) {
-      console.error(
-        'Top products error:',
-        err
-      );
-
-      res.status(500).json({
-        error:
-          'Failed to load top products',
-      });
+      reportError(res, err, 'Failed to load top products');
     }
   }
 );
@@ -1686,14 +1583,8 @@ router.get(
   requireAuth,
   requireAdmin,
   async (req, res) => {
-    const range = String(
-      req.query.range || 'month'
-    );
-
-    const rangeStart =
-      getRangeStart(range);
-
     try {
+      const period = await resolveReportPeriod(pool, req.query);
       const result =
         await pool.query(`
           WITH sales_by_method AS (
@@ -1717,8 +1608,8 @@ router.get(
                 'refunded'
               )
 
-              AND created_at::date >=
-                ${rangeStart}
+              AND created_at >= $1::date
+              AND created_at < ($2::date + INTERVAL '1 day')
 
             GROUP BY
               payment_method
@@ -1740,8 +1631,8 @@ router.get(
 
               AND refunded_at IS NOT NULL
 
-              AND refunded_at::date >=
-                ${rangeStart}
+              AND refunded_at >= $1::date
+              AND refunded_at < ($2::date + INTERVAL '1 day')
 
             GROUP BY
               payment_method
@@ -1777,7 +1668,7 @@ router.get(
 
           ORDER BY
             amount DESC
-        `);
+        `, period.values);
 
       res.json(
         result.rows.map(
@@ -1798,15 +1689,7 @@ router.get(
         )
       );
     } catch (err) {
-      console.error(
-        'Payment report error:',
-        err
-      );
-
-      res.status(500).json({
-        error:
-          'Failed to load payment report',
-      });
+      reportError(res, err, 'Failed to load payment report');
     }
   }
 );
@@ -1820,10 +1703,8 @@ router.get(
   requireAuth,
   requireAdmin,
   async (req, res) => {
-    const range = String(req.query.range || 'month');
-    const rangeStart = getRangeStart(range);
-
     try {
+      const period = await resolveReportPeriod(pool, req.query);
       const result = await pool.query(`
         SELECT
           s.id,
@@ -1858,7 +1739,8 @@ router.get(
         WHERE
           s.status = 'refunded'
           AND s.refunded_at IS NOT NULL
-          AND s.refunded_at::date >= ${rangeStart}
+          AND s.refunded_at >= $1::date
+          AND s.refunded_at < ($2::date + INTERVAL '1 day')
 
         GROUP BY
           s.id,
@@ -1874,7 +1756,7 @@ router.get(
           s.refunded_at DESC
 
         LIMIT 50
-      `);
+      `, period.values);
 
       res.json(
         result.rows.map((row) => ({
@@ -1908,14 +1790,7 @@ router.get(
         }))
       );
     } catch (err) {
-      console.error(
-        'Refund report error:',
-        err
-      );
-
-      res.status(500).json({
-        error: 'Failed to load refund report',
-      });
+      reportError(res, err, 'Failed to load refund report');
     }
   }
 );

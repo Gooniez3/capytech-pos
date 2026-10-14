@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 
@@ -56,9 +57,22 @@ function formatDateTime(value: string) {
 
 type ReportRange =
   | 'today'
+  | 'yesterday'
   | 'week'
   | 'month'
-  | 'year';
+  | 'year'
+  | 'custom';
+
+type ChartRange = 'today' | 'week' | 'month' | 'year';
+
+interface AppliedPeriod {
+  range: ReportRange;
+  from?: string;
+  to?: string;
+  label: string;
+  query: string;
+  chartRange: ChartRange;
+}
 
 interface Summary {
   grossSales: number;
@@ -146,6 +160,9 @@ function rangeLabel(
     case 'today':
       return 'Today';
 
+    case 'yesterday':
+      return 'Yesterday';
+
     case 'week':
       return 'Last 7 Days';
 
@@ -154,7 +171,33 @@ function rangeLabel(
 
     case 'year':
       return 'This Year';
+
+    case 'custom':
+      return 'Custom';
   }
+}
+
+function localDateOnly(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatSelectedDate(value: string) {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  }).format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+function presetPeriod(range: Exclude<ReportRange, 'custom'>): AppliedPeriod {
+  return {
+    range,
+    label: rangeLabel(range),
+    query: `range=${range}`,
+    chartRange: range === 'year' ? 'year' : range === 'week' ? 'week' : range === 'month' ? 'month' : 'today',
+  };
 }
 
 function paymentLabel(
@@ -231,12 +274,13 @@ export function ReportsPage() {
   const { toast } =
     useToast();
 
-  const [
-    range,
-    setRange,
-  ] = useState<ReportRange>(
-    'today'
-  );
+  const [period, setPeriod] = useState<AppliedPeriod>(() => presetPeriod('today'));
+  const [loadedPeriod, setLoadedPeriod] = useState<AppliedPeriod>(() => presetPeriod('today'));
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customFrom, setCustomFrom] = useState(() => localDateOnly());
+  const [customTo, setCustomTo] = useState(() => localDateOnly());
+  const [periodError, setPeriodError] = useState<string | null>(null);
+  const reportRequestRef = useRef(0);
 
   const [
     summary,
@@ -308,9 +352,24 @@ const [
 
   useEffect(() => {
     loadReports();
-  }, [range]);
+  }, [period.query]);
+
+  useEffect(() => {
+    async function loadLowStock() {
+      try {
+        setLowStock(await api.get<LowStockItem[]>('/api/reports/low-stock'));
+      } catch (loadError) {
+        toast(
+          loadError instanceof Error ? loadError.message : 'Failed to load low-stock data.',
+          'error'
+        );
+      }
+    }
+    loadLowStock();
+  }, [toast]);
 
   async function loadReports() {
+    const requestId = ++reportRequestRef.current;
     setLoading(true);
     setError(null);
 
@@ -321,32 +380,29 @@ const [
         topData,
         paymentData,
         refundData,
-        lowStockData,
       ] = await Promise.all([
         api.get<Summary>(
-          `/api/reports/summary?range=${range}`
+          `/api/reports/summary?${period.query}`
         ),
 
         api.get<RevenuePoint[]>(
-          `/api/reports/sales-trend?range=${range}`
+          `/api/reports/sales-trend?${period.query}`
         ),
 
         api.get<TopProduct[]>(
-          `/api/reports/top-products?range=${range}&limit=10`
+          `/api/reports/top-products?${period.query}&limit=10`
         ),
 
         api.get<PaymentMethod[]>(
-          `/api/reports/payment-methods?range=${range}`
+          `/api/reports/payment-methods?${period.query}`
         ),
 
         api.get<RefundRow[]>(
-          `/api/reports/refunds?range=${range}`
-        ),
-
-        api.get<LowStockItem[]>(
-          '/api/reports/low-stock'
+          `/api/reports/refunds?${period.query}`
         ),
       ]);
+
+      if (requestId !== reportRequestRef.current) return;
 
       setSummary({
         ...summaryData,
@@ -371,18 +427,51 @@ const [
         refundData
       );
 
-      setLowStock(
-        lowStockData
-      );
+      setLoadedPeriod(period);
     } catch (error) {
+      if (requestId !== reportRequestRef.current) return;
       setError(
         error instanceof Error
           ? error.message
           : 'Failed to load reports.'
       );
     } finally {
-      setLoading(false);
+      if (requestId === reportRequestRef.current) setLoading(false);
     }
+  }
+
+  function selectPreset(nextRange: Exclude<ReportRange, 'custom'>) {
+    setPeriodError(null);
+    setCustomOpen(false);
+    setPeriod(presetPeriod(nextRange));
+  }
+
+  function applyCustomPeriod() {
+    const today = localDateOnly();
+    if (!customFrom || !customTo) {
+      setPeriodError('Choose both From and To dates.');
+      return;
+    }
+    if (customFrom > customTo) {
+      setPeriodError('From date cannot be after To date.');
+      return;
+    }
+    if (customTo > today) {
+      setPeriodError('Reporting dates cannot be in the future.');
+      return;
+    }
+    const label = customFrom === customTo
+      ? formatSelectedDate(customFrom)
+      : `${formatSelectedDate(customFrom)} – ${formatSelectedDate(customTo)}`;
+    setPeriodError(null);
+    setPeriod({
+      range: 'custom',
+      from: customFrom,
+      to: customTo,
+      label,
+      query: `range=custom&from=${encodeURIComponent(customFrom)}&to=${encodeURIComponent(customTo)}`,
+      chartRange: customFrom === customTo ? 'today' : 'month',
+    });
   }
 
   /* =========================================================
@@ -484,7 +573,7 @@ const [
     overview.mergeCells('A2:D2');
 
     const periodCell = overview.getCell('A2');
-    periodCell.value = `Reporting Period: ${rangeLabel(range)}`;
+    periodCell.value = `Reporting Period: ${loadedPeriod.label}`;
     periodCell.font = {
       bold: true,
       size: 11,
@@ -687,7 +776,7 @@ const [
     productsSheet.mergeCells('A2:H2');
 
     productsSheet.getCell('A2').value =
-      `${rangeLabel(range)} — Variant-level profitability`;
+      `${loadedPeriod.label} — Variant-level profitability`;
 
     productsSheet.getCell('A2').font = {
       size: 10,
@@ -1244,7 +1333,7 @@ const [
     link.href = url;
 
     link.download =
-      `CapyTech_Report_${range}_${date}.xlsx`;
+      `CapyTech_Report_${loadedPeriod.range}_${loadedPeriod.from || date}_${loadedPeriod.to || date}.xlsx`;
 
     document.body.appendChild(link);
 
@@ -1257,7 +1346,7 @@ const [
     URL.revokeObjectURL(url);
 
     toast(
-      `${rangeLabel(range)} Excel report exported successfully.`,
+      `${loadedPeriod.label} Excel report exported successfully.`,
       'success'
     );
   } catch (error) {
@@ -1301,10 +1390,7 @@ const [
      ERROR
      ========================================================= */
 
-  if (
-    error ||
-    !summary
-  ) {
+  if (!summary) {
     return (
       <div className="space-y-6">
         <PageHeader
@@ -1359,6 +1445,7 @@ const [
             onClick={
               exportReport
             }
+            disabled={loading}
           >
             Export
           </Button>
@@ -1382,16 +1469,17 @@ const [
               {(
                 [
                   'today',
+                  'yesterday',
                   'week',
                   'month',
                   'year',
-                ] as ReportRange[]
+                ] as Exclude<ReportRange, 'custom'>[]
               ).map(
                 (
                   item
                 ) => {
                   const active =
-                    range ===
+                    period.range ===
                     item;
 
                   return (
@@ -1400,11 +1488,7 @@ const [
                         item
                       }
                       type="button"
-                      onClick={() =>
-                        setRange(
-                          item
-                        )
-                      }
+                      onClick={() => selectPreset(item)}
                       className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
                         active
                           ? 'bg-slate-900 text-white shadow-sm'
@@ -1418,6 +1502,20 @@ const [
                   );
                 }
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  setCustomOpen(true);
+                  setPeriodError(null);
+                }}
+                className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                  period.range === 'custom'
+                    ? 'bg-slate-900 text-white shadow-sm'
+                    : 'bg-slate-50 text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                Custom
+              </button>
             </div>
           </div>
 
@@ -1427,13 +1525,46 @@ const [
             </p>
 
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {rangeLabel(
-                range
-              )}
+              {loading ? `Loading ${period.label}…` : loadedPeriod.label}
             </p>
           </div>
 
         </div>
+
+        {customOpen && (
+          <div className="mt-4 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+            <label className="text-sm font-semibold text-slate-700">
+              From Date
+              <input
+                type="date"
+                value={customFrom}
+                max={localDateOnly()}
+                onChange={(event) => setCustomFrom(event.target.value)}
+                className="mt-1 h-10 w-full rounded-lg border border-slate-300 bg-white px-3"
+              />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              To Date
+              <input
+                type="date"
+                value={customTo}
+                max={localDateOnly()}
+                onChange={(event) => setCustomTo(event.target.value)}
+                className="mt-1 h-10 w-full rounded-lg border border-slate-300 bg-white px-3"
+              />
+            </label>
+            <Button onClick={applyCustomPeriod}>Apply Dates</Button>
+            {periodError && (
+              <p className="text-sm font-semibold text-danger-600 sm:col-span-3">{periodError}</p>
+            )}
+          </div>
+        )}
+
+        {error && summary && (
+          <div className="mt-4 rounded-lg border border-danger-200 bg-danger-50 px-4 py-3 text-sm font-medium text-danger-700">
+            {error} The previous successful report remains displayed.
+          </div>
+        )}
 
       </div>
 
@@ -1449,7 +1580,7 @@ const [
   </p>
 
   <p className="mt-1 text-sm font-medium text-slate-600">
-    Financial results for {rangeLabel(range)}.
+    Financial results for {loadedPeriod.label}.
   </p>
 </div>
 
@@ -1581,9 +1712,7 @@ const [
             </h2>
 
             <p className="mt-1 text-sm text-slate-500">
-              Revenue, cost, and profitability over {rangeLabel(
-                range
-              ).toLowerCase()}.
+              Revenue, cost, and profitability over {loadedPeriod.label.toLowerCase()}.
             </p>
           </div>
 
@@ -1611,7 +1740,7 @@ const [
         <div className="p-5">
           <ReportTrendChart
             data={trend}
-            range={range}
+            range={loadedPeriod.chartRange}
           />
         </div>
 
