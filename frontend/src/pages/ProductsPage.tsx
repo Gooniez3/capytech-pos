@@ -22,6 +22,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 
 import { useToast } from '@/context/ToastContext';
 import { api } from '@/lib/api';
@@ -100,6 +101,23 @@ interface ProductView extends Product {
   imagePath?: string | null;
   serialTrackingEnabled: boolean;
 }
+
+type ProductConfirmation =
+  | {
+      type: 'trash-image';
+      productId: string;
+      productName: string;
+    }
+  | {
+      type: 'remove-variant';
+      index: number;
+      variantId: string;
+      variantName: string;
+    }
+  | {
+      type: 'delete-product';
+      product: ProductView;
+    };
 
 interface ProductForm {
   name: string;
@@ -256,6 +274,11 @@ const [form, setForm] =
     useState<string | null>(null);
 
   const [imageBusy, setImageBusy] = useState(false);
+
+  const [productConfirmation, setProductConfirmation] =
+    useState<ProductConfirmation | null>(null);
+  const [confirmationBusy, setConfirmationBusy] = useState(false);
+  const confirmationBusyRef = useRef(false);
 
   const [variants, setVariants] =
   useState<VariantForm[]>([]);
@@ -649,34 +672,14 @@ function removeSelectedImage() {
   setImagePreview(savedImageUrl);
 }
 
-async function trashSavedImage() {
+function trashSavedImage() {
   if (!editingProduct || !savedImageUrl || imageBusy) return;
 
-  const confirmed = window.confirm(
-    'Move this product image to trash?\n\nYou can restore it from this page.'
-  );
-  if (!confirmed) return;
-
-  setImageBusy(true);
-  try {
-    const status = await api.post<ProductImageStatus>(
-      `/api/products/${editingProduct.id}/image/trash`
-    );
-    applyImageStatus(status, editingProduct.id);
-    toast(
-      status.message || 'Image moved to trash.',
-      'success'
-    );
-  } catch (error) {
-    toast(
-      error instanceof Error
-        ? error.message
-        : 'Failed to move image to trash.',
-      'error'
-    );
-  } finally {
-    setImageBusy(false);
-  }
+  setProductConfirmation({
+    type: 'trash-image',
+    productId: editingProduct.id,
+    productName: editingProduct.name,
+  });
 }
 
 async function restoreTrashedImage() {
@@ -741,15 +744,19 @@ function updateVariant(
   );
 }
 
-async function removeVariant(index: number) {
+function removeVariant(index: number) {
   const variant = variants[index];
 
   if (!variant) return;
 
   if (variant.id && editingProduct) {
-    const confirmed = window.confirm(`Remove variant "${variant.name}" when changes are saved?`);
-    if (!confirmed) return;
-    setRemovedVariantIds((current) => [...current, variant.id!]);
+    setProductConfirmation({
+      type: 'remove-variant',
+      index,
+      variantId: variant.id,
+      variantName: variant.name,
+    });
+    return;
   }
 
   setVariants((current) =>
@@ -1047,34 +1054,79 @@ setExpandedProductId(null);
   }
 }
 
-  async function deleteProduct(
+  function deleteProduct(
   product: ProductView
 ) {
-  const confirmed = window.confirm(
-    `Move "${product.name}" to Recently deleted?\n\n` +
-      'It will disappear from the POS and product list. You can restore it from Recently deleted. Historical sales stay.'
-  );
+    setProductConfirmation({
+      type: 'delete-product',
+      product,
+    });
+  }
 
-    if (!confirmed) return;
+  function cancelProductConfirmation() {
+    if (confirmationBusyRef.current) return;
+    setProductConfirmation(null);
+  }
+
+  async function confirmProductAction() {
+    if (!productConfirmation || confirmationBusyRef.current) return;
+
+    const action = productConfirmation;
+    confirmationBusyRef.current = true;
+
+    if (action.type !== 'remove-variant') {
+      setConfirmationBusy(true);
+    }
 
     try {
-      await api.delete<{ message: string }>(
-        `/api/products/${product.id}`
-      );
+      if (action.type === 'trash-image') {
+        setImageBusy(true);
+        const status = await api.post<ProductImageStatus>(
+          `/api/products/${action.productId}/image/trash`
+        );
+        applyImageStatus(status, action.productId);
+        toast(
+          status.message || 'Image moved to trash.',
+          'success'
+        );
+      } else if (action.type === 'remove-variant') {
+        setRemovedVariantIds((current) =>
+          current.includes(action.variantId)
+            ? current
+            : [...current, action.variantId]
+        );
+        setVariants((current) =>
+          current.filter(
+            (variant, index) =>
+              index !== action.index || variant.id !== action.variantId
+          )
+        );
+      } else {
+        await api.delete<{ message: string }>(
+          `/api/products/${action.product.id}`
+        );
+        toast(
+          'Product moved to Recently deleted.',
+          'success'
+        );
+        await loadData();
+      }
 
-      toast(
-        'Product moved to Recently deleted.',
-        'success'
-      );
-
-      await loadData();
+      setProductConfirmation(null);
     } catch (error) {
+      const fallback = action.type === 'trash-image'
+        ? 'Failed to move image to trash.'
+        : 'Failed to remove product.';
       toast(
-        error instanceof Error
-          ? error.message
-          : 'Failed to remove product.',
+        error instanceof Error ? error.message : fallback,
         'error'
       );
+    } finally {
+      if (action.type === 'trash-image') {
+        setImageBusy(false);
+      }
+      confirmationBusyRef.current = false;
+      setConfirmationBusy(false);
     }
   }
 
@@ -1346,6 +1398,29 @@ function printBarcodeLabel({
   );
   const restockSerialCount = restockSerials.split(/\r?\n/).filter((line) => line.trim()).length;
   const restockReceived = restockTracked ? restockSerialCount : Number(restockQuantity || 0);
+
+  const confirmationContent = productConfirmation?.type === 'trash-image'
+    ? {
+        title: 'Move product image to trash?',
+        description: `The saved image for "${productConfirmation.productName}" will move to recoverable trash. You can restore it from this product page.`,
+        confirmLabel: 'Move to trash',
+        variant: 'warning' as const,
+      }
+    : productConfirmation?.type === 'remove-variant'
+      ? {
+          title: 'Remove this variant?',
+          description: `"${productConfirmation.variantName}" will be marked for removal when you save the product. Your other unsaved product edits will remain unchanged.`,
+          confirmLabel: 'Remove variant',
+          variant: 'warning' as const,
+        }
+      : productConfirmation?.type === 'delete-product'
+        ? {
+            title: 'Move product to Recently Deleted?',
+            description: `"${productConfirmation.product.name}" will be removed from the POS and product list. You can restore it from Recently Deleted, and historical sales will remain unchanged.`,
+            confirmLabel: 'Move to Recently Deleted',
+            variant: 'danger' as const,
+          }
+        : null;
 
   return (
     <div className="space-y-6">
@@ -2697,6 +2772,20 @@ function printBarcodeLabel({
     </div>
   )}
 </Modal>
+
+{confirmationContent && (
+  <ConfirmDialog
+    open={!!productConfirmation}
+    title={confirmationContent.title}
+    description={confirmationContent.description}
+    confirmLabel={confirmationContent.confirmLabel}
+    cancelLabel="Cancel"
+    variant={confirmationContent.variant}
+    busy={confirmationBusy}
+    onConfirm={confirmProductAction}
+    onCancel={cancelProductConfirmation}
+  />
+)}
     </div>
   );
 }
