@@ -1,9 +1,33 @@
 import { defineConfig } from '@playwright/test';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+function requiredEnvironment(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} must explicitly identify the disposable E2E environment`);
+  return value;
+}
+
+const database = requiredEnvironment('CAPYTECH_E2E_DB_NAME');
+const databaseHost = requiredEnvironment('CAPYTECH_E2E_DB_HOST');
+const databasePort = Number(requiredEnvironment('CAPYTECH_E2E_DB_PORT'));
+const databaseUser = requiredEnvironment('CAPYTECH_E2E_DB_USER');
+const databasePassword = requiredEnvironment('CAPYTECH_E2E_DB_PASSWORD');
+
+if (!/^capytech_e2e_[a-z0-9_]+$/.test(database) || database === 'pos_store') {
+  throw new Error(`Refusing unsafe E2E database: ${database}`);
+}
+if (!['127.0.0.1', 'localhost', '::1'].includes(databaseHost)) {
+  throw new Error(`E2E database host must be loopback, received: ${databaseHost}`);
+}
+if (!Number.isInteger(databasePort) || databasePort < 1 || databasePort > 65535) {
+  throw new Error(`Invalid CAPYTECH_E2E_DB_PORT: ${process.env.CAPYTECH_E2E_DB_PORT}`);
+}
+
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const storageRoot = 'C:\\tmp\\capytech-2g1-storage-1d4560e';
+const artifactRoot = path.join(os.tmpdir(), 'capytech-e2e', database);
+const storageRoot = path.join(artifactRoot, 'storage');
 
 export default defineConfig({
   testDir: './e2e',
@@ -13,7 +37,7 @@ export default defineConfig({
   timeout: 180_000,
   expect: { timeout: 10_000 },
   reporter: [['line']],
-  outputDir: 'C:\\tmp\\capytech-2g1-playwright-results-1d4560e',
+  outputDir: path.join(artifactRoot, 'results'),
   use: {
     baseURL: 'https://127.0.0.1:5573',
     channel: 'chrome',
@@ -34,12 +58,12 @@ export default defineConfig({
       env: {
         ...process.env,
         PORT: '4400',
-        DB_HOST: '127.0.0.1',
-        DB_PORT: '55439',
-        DB_NAME: 'capytech_e2e_2g1_20261013d_1d4560e',
-        DB_USER: 'capytech_e2e_admin',
-        DB_PASSWORD: 'e2e-only-unused',
-        JWT_SECRET: 'phase-2g1-disposable-browser-tests-only',
+        DB_HOST: databaseHost,
+        DB_PORT: String(databasePort),
+        DB_NAME: database,
+        DB_USER: databaseUser,
+        DB_PASSWORD: databasePassword,
+        JWT_SECRET: 'phase-3f2-disposable-browser-tests-only',
         PRODUCT_IMAGES_DIR: storageRoot,
       },
     },

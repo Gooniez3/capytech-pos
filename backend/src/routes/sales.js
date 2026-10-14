@@ -49,6 +49,21 @@ function rejectLegacySerializedCheckout(targetName) {
   throw error;
 }
 
+function rejectInsufficientCheckoutStock(
+  targetName,
+  { checkoutContractVersion, serialTrackingEnabled }
+) {
+  const error = new CheckoutValidationError(
+    `Not enough stock for ${targetName}`
+  );
+
+  if (checkoutContractVersion === 2 && serialTrackingEnabled) {
+    error.statusCode = 409;
+  }
+
+  throw error;
+}
+
 // Generates a simple sequential invoice number like INV-000123
 async function generateInvoiceNumber(client) {
   const result = await client.query(`
@@ -534,8 +549,12 @@ p.name AS product_name
             variant.stock_quantity
           ) < quantity
         ) {
-          throw new CheckoutValidationError(
-            `Not enough stock for ${variant.product_name} — ${variant.variant_name}`
+          rejectInsufficientCheckoutStock(
+            `${variant.product_name} — ${variant.variant_name}`,
+            {
+              checkoutContractVersion,
+              serialTrackingEnabled: variant.serial_tracking_enabled === true,
+            }
           );
         }
 
@@ -677,9 +696,10 @@ continue;
           product.stock_quantity
         ) < quantity
       ) {
-        throw new CheckoutValidationError(
-          `Not enough stock for ${product.name}`
-        );
+        rejectInsufficientCheckoutStock(product.name, {
+          checkoutContractVersion,
+          serialTrackingEnabled: product.serial_tracking_enabled === true,
+        });
       }
 
       const unitPriceMinorUnits = authoritativeDecimalToMinorUnits(

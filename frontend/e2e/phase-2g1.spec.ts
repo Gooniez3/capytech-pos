@@ -1,4 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import os from 'node:os';
+import path from 'node:path';
 
 const password = 'E2eOnly!2026';
 
@@ -109,7 +111,7 @@ async function finishCashSale(page: Page, doubleClick = false) {
   return { invoice, saleId: savedSale.id as number, receiptText: receiptText || '' };
 }
 
-test('Phase 2G.1 serialized inventory and shop warranty browser workflows', async ({ browser }) => {
+test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflows', async ({ browser }) => {
   const adminContext = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await adminContext.newPage();
 
@@ -257,7 +259,7 @@ test('Phase 2G.1 serialized inventory and shop warranty browser workflows', asyn
     await kind.selectOption('serial_number');
     await input.fill('SN-0001');
     await page.getByRole('button', { name: 'Search' }).click();
-    await expect(page.getByText(serializedInvoice, { exact: true })).toBeVisible();
+    await expect(page.getByText(new RegExp(`^${serializedInvoice} · `))).toBeVisible();
 
     await kind.selectOption('internal_sku');
     await input.fill(serializedSu);
@@ -268,22 +270,22 @@ test('Phase 2G.1 serialized inventory and shop warranty browser workflows', asyn
   await test.step('refund quarantines serialized unit and sale history shows refunded status', async () => {
     await page.goto('/sales');
     await page.getByPlaceholder('Search by invoice number...').fill(serializedInvoice);
-    await page.getByRole('button', { name: 'View' }).click();
+    await page.getByRole('row').filter({ hasText: serializedInvoice }).click();
     await page.getByRole('button', { name: 'Refund' }).click();
     await page.getByPlaceholder('Example: Customer returned defective item...').fill('Phase 2G.1 browser refund');
     await page.getByRole('button', { name: 'Confirm Refund' }).click();
     await expect(page.getByText(`${serializedInvoice} refunded successfully.`)).toBeVisible();
-    await expect(page.getByText('Refunded', { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Refunded', exact: true })).toBeVisible();
 
     await page.goto('/stock-units');
     await page.getByPlaceholder('Search serial, SU- code, product, or variant').fill('SN-0001');
-    await expect(page.getByText('quarantined', { exact: true })).toBeVisible();
+    await expect(page.getByRole('table').getByText('quarantined', { exact: true })).toBeVisible();
   });
 
   await test.step('sale details and A4 print rendering use saved snapshots', async () => {
     await page.goto('/sales');
     await page.getByPlaceholder('Search by invoice number...').fill(warrantyInvoice);
-    await page.getByRole('button', { name: 'View' }).click();
+    await page.getByRole('row').filter({ hasText: warrantyInvoice }).click();
     await expect(page.getByText(/6 months/).first()).toBeVisible();
     await page.keyboard.press('Escape');
 
@@ -295,8 +297,10 @@ test('Phase 2G.1 serialized inventory and shop warranty browser workflows', asyn
       clientWidth: element.clientWidth,
     }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+    const database = process.env.CAPYTECH_E2E_DB_NAME!;
+    const artifactRoot = path.join(os.tmpdir(), 'capytech-e2e', database);
     await page.pdf({
-      path: 'C:\\tmp\\capytech-2g1-playwright-results-1d4560e\\invoice-a4.pdf',
+      path: path.join(artifactRoot, 'invoice-a4.pdf'),
       format: 'A4',
       printBackground: true,
     });

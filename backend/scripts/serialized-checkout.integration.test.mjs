@@ -95,6 +95,13 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
         VALUES ('P2E-SERIAL', 'Serialized Laptop', $1, 1000, 600, 0, TRUE, TRUE, 3)
         RETURNING id
       `, [category.id]);
+      const exhaustedTracked = await one(pool, `
+        INSERT INTO products
+          (sku, name, category_id, price, cost, stock_quantity,
+           serial_tracking_enabled, shop_warranty_enabled)
+        VALUES ('P2E-EXHAUSTED', 'Single Serialized Unit', $1, 500, 300, 0, TRUE, FALSE)
+        RETURNING id
+      `, [category.id]);
       const untracked = await one(pool, `
         INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
         VALUES ('P2E-CABLE', 'Cable', $1, 100, 40, 10) RETURNING id
@@ -120,6 +127,10 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       const units = await withTransaction(pool, (transaction) => registerReceivedUnits(transaction, {
         actorUserId: admin.id,
         batches: [{ productId: tracked.id, serialNumbers: ['P2E-001', 'P2E-002', 'P2E-003', 'P2E-004'] }],
+      }));
+      const exhaustedUnits = await withTransaction(pool, (transaction) => registerReceivedUnits(transaction, {
+        actorUserId: admin.id,
+        batches: [{ productId: exhaustedTracked.id, serialNumbers: ['P2E-ONLY-001'] }],
       }));
       const variantUnits = await withTransaction(pool, (transaction) => registerReceivedUnits(transaction, {
         actorUserId: admin.id,
@@ -207,6 +218,28 @@ test('Phase 2E serialized checkout, refund, void, rollback, and read models are 
       assert.equal((await checkout(
         '133e4567-e89b-42d3-a456-426614174011', units[0].id
       )).statusCode, 409);
+
+      const exhaustedCheckout = (key) => invoke(salesRouter, '/', 'post', {
+        user: { id: cashier.id, role: 'cashier' },
+        body: {
+          checkout_contract_version: 2,
+          idempotency_key: key,
+          payment_method: 'cash',
+          items: [{
+            product_id: exhaustedTracked.id,
+            quantity: 1,
+            stock_unit_ids: [exhaustedUnits[0].id],
+          }],
+        },
+      });
+      assert.equal((await exhaustedCheckout(
+        '143e4567-e89b-42d3-a456-426614174021'
+      )).statusCode, 201);
+      const exhaustedConflict = await exhaustedCheckout(
+        '143e4567-e89b-42d3-a456-426614174022'
+      );
+      assert.equal(exhaustedConflict.statusCode, 409);
+      assert.match(exhaustedConflict.body.error, /Not enough stock/);
 
       const wrongVariant = await invoke(salesRouter, '/', 'post', {
         user: { id: cashier.id, role: 'cashier' }, body: {

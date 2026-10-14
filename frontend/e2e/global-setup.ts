@@ -4,19 +4,35 @@ const require = createRequire(import.meta.url);
 const { Client } = require('../../backend/node_modules/pg');
 const bcrypt = require('../../backend/node_modules/bcrypt');
 
-const database = 'capytech_e2e_2g1_20261013d_1d4560e';
+function requiredEnvironment(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} must explicitly identify the disposable E2E environment`);
+  return value;
+}
+
+const database = requiredEnvironment('CAPYTECH_E2E_DB_NAME');
+const host = requiredEnvironment('CAPYTECH_E2E_DB_HOST');
+const port = Number(requiredEnvironment('CAPYTECH_E2E_DB_PORT'));
+const user = requiredEnvironment('CAPYTECH_E2E_DB_USER');
+const password = requiredEnvironment('CAPYTECH_E2E_DB_PASSWORD');
 
 export default async function globalSetup() {
-  if (database === 'pos_store' || !database.startsWith('capytech_e2e_2g1_')) {
+  if (!/^capytech_e2e_[a-z0-9_]+$/.test(database) || database === 'pos_store') {
     throw new Error(`Refusing unsafe E2E database: ${database}`);
+  }
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    throw new Error(`E2E database host must be loopback, received: ${host}`);
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid CAPYTECH_E2E_DB_PORT: ${process.env.CAPYTECH_E2E_DB_PORT}`);
   }
 
   const client = new Client({
-    host: '127.0.0.1',
-    port: 55439,
+    host,
+    port,
     database,
-    user: 'capytech_e2e_admin',
-    password: 'e2e-only-unused',
+    user,
+    password,
   });
   await client.connect();
 
@@ -26,7 +42,11 @@ export default async function globalSetup() {
     );
     const current = identity.rows[0];
     const serverAddress = String(current.host).split('/')[0];
-    if (current.database !== database || serverAddress !== '127.0.0.1' || Number(current.port) !== 55439) {
+    if (
+      current.database !== database
+      || !['127.0.0.1', '::1'].includes(serverAddress)
+      || Number(current.port) !== port
+    ) {
       throw new Error(`Disposable database identity mismatch: ${JSON.stringify(current)}`);
     }
 
@@ -85,7 +105,7 @@ export default async function globalSetup() {
               'Disposable test environment', 'MMK', 0)
     `);
     await client.query('COMMIT');
-    console.log(`Verified disposable E2E database ${database} at 127.0.0.1:55439`);
+    console.log(`Verified disposable E2E database ${database} at ${serverAddress}:${port}`);
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;
