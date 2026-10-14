@@ -1,7 +1,7 @@
 const os = require('os');
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
-const ALLOWED_PORTS = new Set(['', '80', '443', '3000', '4000', '5173']);
+const ALLOWED_PORTS = new Set(['', '80', '443', '3000', '4000', '4001', '5173', '5174']);
 
 function isIPv4Interface(address) {
   return address.family === 'IPv4' || address.family === 4;
