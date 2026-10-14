@@ -12,7 +12,9 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '@/context/AuthContext';
+import { useToast } from '@/context/ToastContext';
 import { api } from '@/lib/api';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -39,6 +41,7 @@ export function Header({
   title,
 }: HeaderProps) {
   const { user } = useAuth();
+  const { toast } = useToast();
 
   const [
     notifications,
@@ -60,8 +63,21 @@ export function Header({
     setLoadingNotifications,
   ] = useState(false);
 
+  const [
+    deleteNotificationsOpen,
+    setDeleteNotificationsOpen,
+  ] = useState(false);
+
+  const [
+    deletingNotifications,
+    setDeletingNotifications,
+  ] = useState(false);
+
   const notificationRef =
     useRef<HTMLDivElement | null>(null);
+
+  const deletingNotificationsRef =
+    useRef(false);
 
   /* =========================================================
      LOAD NOTIFICATIONS
@@ -126,6 +142,7 @@ export function Header({
       event: MouseEvent
     ) {
       if (
+        !deleteNotificationsOpen &&
         notificationRef.current &&
         !notificationRef.current.contains(
           event.target as Node
@@ -146,7 +163,7 @@ export function Header({
         handleClickOutside
       );
     };
-  }, []);
+  }, [deleteNotificationsOpen]);
 
   /* =========================================================
      MARK ONE AS READ
@@ -224,18 +241,15 @@ export function Header({
    ========================================================= */
 
 async function deleteAllNotifications() {
-  if (notifications.length === 0) {
+  if (
+    notifications.length === 0 ||
+    deletingNotificationsRef.current
+  ) {
     return;
   }
 
-  const confirmed =
-    window.confirm(
-      'Delete all notifications? This cannot be undone.'
-    );
-
-  if (!confirmed) {
-    return;
-  }
+  deletingNotificationsRef.current = true;
+  setDeletingNotifications(true);
 
   try {
     await api.delete<{
@@ -246,11 +260,25 @@ async function deleteAllNotifications() {
 
     setNotifications([]);
     setUnreadCount(0);
+    setDeleteNotificationsOpen(false);
+    toast(
+      'All notifications deleted.',
+      'success'
+    );
   } catch (error) {
     console.error(
       'Failed to delete notifications:',
       error
     );
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'Failed to delete notifications.',
+      'error'
+    );
+  } finally {
+    deletingNotificationsRef.current = false;
+    setDeletingNotifications(false);
   }
 }
 
@@ -505,7 +533,9 @@ async function deleteAllNotifications() {
   {notifications.length > 0 && (
     <button
       type="button"
-      onClick={deleteAllNotifications}
+      onClick={() =>
+        setDeleteNotificationsOpen(true)
+      }
       className="
         flex
         items-center
@@ -694,6 +724,20 @@ async function deleteAllNotifications() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteNotificationsOpen}
+        title="Delete all notifications?"
+        description="This permanently deletes every notification. This action cannot be undone."
+        confirmLabel="Delete all"
+        cancelLabel="Cancel"
+        variant="danger"
+        busy={deletingNotifications}
+        onConfirm={deleteAllNotifications}
+        onCancel={() =>
+          setDeleteNotificationsOpen(false)
+        }
+      />
     </header>
   );
 }
