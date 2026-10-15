@@ -52,6 +52,10 @@ import {
   up as cpUp, down as cpDown, UP_SQL as CP_UP_SQL,
   MIGRATION_NAME as CP_MIGRATION_NAME, NEW_SEQUENCES as CP_NEW_SEQUENCES,
 } from '../migrations/1792108800000_cp-catalog-codes.mjs';
+import {
+  up as historicalUp, down as historicalDown, UP_SQL as HISTORICAL_UP_SQL,
+  MIGRATION_NAME as HISTORICAL_MIGRATION_NAME, NEW_TABLES as HISTORICAL_NEW_TABLES,
+} from '../migrations/1792195200000_historical-sales-reports.mjs';
 
 const P04 = '1788652800001_p04-database-constraints';
 const P06 = '1788652800002_p06-checkout-request-fingerprint';
@@ -62,7 +66,8 @@ const P3A = '1791849600000_p3a-inventory-movements';
 const P3D = '1791936000000_p3d-inventory-receipts';
 const FIX01 = '1792022400000_fix01-stock-unit-barcode-codes';
 const CP = '1792108800000_cp-catalog-codes';
-const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B, P3A, P3D, FIX01, CP];
+const HISTORICAL = '1792195200000_historical-sales-reports';
+const EXPECTED_MIGRATIONS = [BASELINE, P04, P06, P08, P10, P2B, P3A, P3D, FIX01, CP, HISTORICAL];
 
 const expected = JSON.parse(await readFile(join(MIGRATIONS,'baseline-schema.json'),'utf8'));
 const clone = () => structuredClone(expected);
@@ -272,6 +277,26 @@ test('Phase B adds globally unique immutable CP catalog identities without rewri
   cpUp(builder);
   assert.equal(builder.value,CP_UP_SQL);
   assert.throws(()=>cpDown(),/rollback is intentionally blocked/);
+});
+
+test('historical reports migration creates only empty isolated append-only tables',()=>{
+  assert.equal(HISTORICAL_MIGRATION_NAME,HISTORICAL);
+  assert.deepEqual(HISTORICAL_NEW_TABLES,[
+    'historical_sales_archives','historical_sales',
+    'historical_monthly_summaries','historical_all_time_summaries',
+  ]);
+  for (const table of HISTORICAL_NEW_TABLES) {
+    assert.match(HISTORICAL_UP_SQL,new RegExp(`CREATE TABLE public\\.${table}`));
+  }
+  assert.doesNotMatch(HISTORICAL_UP_SQL,/^\s*(INSERT|UPDATE|DELETE|DROP|TRUNCATE|SETVAL|RESTART)\b/im);
+  assert.doesNotMatch(HISTORICAL_UP_SQL,/ALTER TABLE public\.(sales|sale_items|payments|inventory|stock_units)/i);
+  assert.doesNotMatch(HISTORICAL_UP_SQL,/\binvoice_number_seq\b|\bnextval\b|\bsetval\b/i);
+  assert.match(HISTORICAL_UP_SQL,/historical_sales_immutable_trg/);
+  assert.match(HISTORICAL_UP_SQL,/Archived|append-only/i);
+  const builder={sql(value){this.value=value;}};
+  historicalUp(builder);
+  assert.equal(builder.value,HISTORICAL_UP_SQL);
+  assert.throws(()=>historicalDown(),/rollback is intentionally blocked/);
 });
 
 test('Phase 3D adds immutable idempotency receipts without changing inventory history',()=>{

@@ -206,6 +206,23 @@ The optional integration test refuses any database whose name does not match
 `CAPYTECH_PHASE2B_TEST_DATABASE_URL` only for a disposable PostgreSQL 17 or 18
 database. Never point it at `pos_store`.
 
+## Historical sales reports migration
+
+`1792195200000_historical-sales-reports.mjs` is additive, transactional, and
+forward-only. It creates four initially empty `historical_*` tables with no sequence
+and no relationship to live sale, payment, inventory, product, or stock-unit rows.
+Update/delete/truncate triggers keep imported archives append-only. The import service
+locks the singleton archive table, revalidates the current database admin, and inserts
+all transaction/month/all-time rows in one transaction. An identical digest is a
+no-op; a different digest is refused.
+
+The migration contains no data write, backfill, sequence call, or alteration of an
+existing table. Backup manifests include all four tables once installed. Isolated
+restore rehearsal requires them to be empty when applying the migration to a backup
+that predates the feature. Use the v2-specific procedure in
+`docs/HISTORICAL_SALES_UPGRADE.md`; do not use a fresh installer or a destructive down
+migration.
+
 ## Implementation validation boundary
 
 Unit tests use in-memory metadata fixtures and compile SQL with the actual pinned
