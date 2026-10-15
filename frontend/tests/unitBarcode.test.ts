@@ -6,14 +6,14 @@ const posSource = await readFile(new URL('../src/pages/POSPage.tsx', import.meta
 const stockUnitsSource = await readFile(new URL('../src/pages/StockUnitsPage.tsx', import.meta.url), 'utf8');
 
 test('POS resolves CT codes as physical units and retains explicit confirmation', () => {
-  assert.match(posSource, /if \(isUnitBarcode\(code\)\)/);
-  assert.match(posSource, /\/api\/stock-units\/lookup\?code=/);
+  assert.match(posSource, /parsedBarcode\?\.kind === 'stock-unit'/);
+  assert.match(posSource, /posBarcodeLookupPath\(parsedBarcode\)/);
   assert.match(posSource, /Confirm Physical Unit/);
   assert.match(posSource, /Confirm & Add to Cart/);
   assert.match(posSource, /Selling price/);
   assert.match(posSource, /Manufacturer serial/);
   assert.match(posSource, /This physical unit is already selected/);
-  assert.match(posSource, /unit\.state !== 'available'/);
+  assert.match(posSource, /stockUnitSaleProblem\(unit\)/);
   assert.match(posSource, /\[pendingScannedUnit\.cartKey\]: \[pendingScannedUnit\.unit\]/);
 });
 
@@ -33,7 +33,7 @@ test('CT matching reads the latest catalog and normalizes numeric and string IDs
 test('catalog refreshes update the ref without restarting or changing scanner transports', () => {
   assert.match(posSource, /setProducts\(\s*productData\.map\(\s*mapProduct/);
   assert.match(posSource, /lookupBarcode\(\s*lastScan\.code/);
-  assert.match(posSource, /await lookupBarcode\(search\)/);
+  assert.match(posSource, /await lookupBarcode\(currentValue\)/);
   assert.match(posSource, /await lookupBarcode\(code\)/);
 });
 
@@ -41,7 +41,7 @@ test('all scanner transports share one guarded confirmation lifecycle', () => {
   assert.match(posSource, /barcodeLookupInFlightRef\.current/);
   assert.match(posSource, /scanConfirmationPendingRef\.current/);
   assert.match(posSource, /lookupBarcode\(\s*lastScan\.code/);
-  assert.match(posSource, /await lookupBarcode\(search\)/);
+  assert.match(posSource, /await lookupBarcode\(currentValue\)/);
   assert.match(posSource, /await lookupBarcode\(code\)/);
   assert.match(posSource, /Serialized products must be scanned using their unique CT unit barcode/);
 });
@@ -58,5 +58,8 @@ test('Stock Units exposes permanent CT labels without changing invoice rendering
   assert.match(stockUnitsSource, /CT barcode/);
   assert.doesNotMatch(stockUnitsSource, />Internal ID</);
   assert.match(stockUnitsSource, /Print/);
+  assert.match(stockUnitsSource, /window\.open\('', '_blank'/);
+  assert.match(stockUnitsSource, /buildStockUnitBarcodePrintDocument/);
+  assert.doesNotMatch(stockUnitsSource, /image\.complete\?print\(\)/);
   assert.doesNotMatch(stockUnitsSource, /InvoicePage/);
 });

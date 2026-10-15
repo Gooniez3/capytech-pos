@@ -15,6 +15,10 @@ import {
   type StockUnitSummary,
   validateSerialBatch,
 } from '@/lib/serializedInventory';
+import {
+  buildStockUnitBarcodePrintDocument,
+  type StockUnitBarcodeLabel,
+} from '@/lib/stockUnitBarcode';
 
 interface ProductPolicy extends InventoryPolicy {
   id: number | string; name: string; sku: string;
@@ -192,23 +196,20 @@ export function StockUnitsPage() {
   }
 
   async function printUnitBarcode(unit: StockUnitSummary) {
+    const popup = window.open('', '_blank', 'width=480,height=420');
+    if (!popup) {
+      toast('Allow pop-ups to print the stock-unit label.', 'error');
+      return;
+    }
+    popup.document.write('<!doctype html><html><body style="font-family:Arial,sans-serif;padding:24px">Loading CT barcode…</body></html>');
+    popup.document.close();
     try {
-      const label = await api.get<{
-        unit_code: string; product_name: string; variant_name: string | null;
-        manufacturer_serial_number: string; barcode: string;
-      }>(`/api/stock-units/${unit.id}/barcode`);
-      const popup = window.open('', '_blank', 'width=480,height=420');
-      if (!popup) throw new Error('Allow pop-ups to print the stock-unit label.');
-      const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
-      }[character] || character));
-      popup.document.write(`<!doctype html><html><head><title>${escape(label.unit_code)}</title><style>
-        @page{size:50mm 30mm;margin:0}html,body{margin:0;width:50mm;height:30mm;font-family:Arial,sans-serif}
-        .label{box-sizing:border-box;width:50mm;height:30mm;padding:2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
-        img{width:42mm;height:12mm;object-fit:contain}.code{font:700 8pt monospace}.name,.serial{max-width:46mm;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:7pt}.name{font-weight:700}
-      </style></head><body><div class="label"><img id="barcode" src="${label.barcode}" alt="${escape(label.unit_code)}"><div class="code">${escape(label.unit_code)}</div><div class="name">${escape(label.product_name)}${label.variant_name ? ` - ${escape(label.variant_name)}` : ''}</div><div class="serial">SN: ${escape(label.manufacturer_serial_number)}</div></div><script>const image=document.getElementById('barcode');const print=()=>setTimeout(()=>window.print(),100);image.complete?print():image.onload=print;</script></body></html>`);
+      const label = await api.get<StockUnitBarcodeLabel>(`/api/stock-units/${unit.id}/barcode`);
+      popup.document.open();
+      popup.document.write(buildStockUnitBarcodePrintDocument(label));
       popup.document.close();
     } catch (error) {
+      popup.close();
       toast(error instanceof Error ? error.message : 'Failed to print unit barcode.', 'error');
     }
   }

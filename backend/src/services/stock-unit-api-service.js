@@ -124,7 +124,9 @@ async function stockUnitDetails(queryable, unitId) {
   const unitResult = await queryable.query(
     `
       SELECT su.*, p.name AS product_name, p.sku AS product_sku, p.product_code,
+             p.is_active AS product_is_active,
              p.price AS product_price, pv.name AS variant_name, pv.sku AS variant_sku,
+             pv.is_active AS variant_is_active,
              pv.product_code AS variant_product_code, pv.price AS variant_price,
              COALESCE(pv.price, p.price) AS effective_price,
              COALESCE(pv.stock_quantity, p.stock_quantity) AS effective_stock_quantity,

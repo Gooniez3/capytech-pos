@@ -61,11 +61,16 @@ import {
   assertCheckoutSelections,
   advanceCheckoutAttempt,
   checkoutAttemptSignature,
-  isUnitBarcode,
   selectedUnitIds,
   warrantySnapshotLabel,
   type StockUnitSummary,
 } from '@/lib/serializedInventory';
+import {
+  parsePosBarcode,
+  posBarcodeLookupPath,
+  stockUnitMatchesCartProduct,
+  stockUnitSaleProblem,
+} from '@/lib/posBarcode';
 import {
   WARRANTY_OPTIONS,
   suggestWarrantyMonths,
@@ -1097,9 +1102,8 @@ const [
     try {
       const unit = await api.get<StockUnitSummary>(`/api/stock-units/lookup?code=${encodeURIComponent(code.trim())}`);
       const product = line.product as POSProduct;
-      const matches = String(unit.product_id) === String(product.parentProductId ?? product.id)
-        && String(unit.variant_id ?? '') === String(product.variantId ?? '');
-      if (!matches || unit.state !== 'available') {
+      const matches = stockUnitMatchesCartProduct(unit, product);
+      if (!matches || stockUnitSaleProblem(unit)) {
         toast('This code is not an available physical unit for the selected cart item.', 'warning'); return false;
       }
       if ((selectedStockUnits[cartKey] || []).some((entry) => String(entry.id) === String(unit.id))) {
@@ -1466,7 +1470,8 @@ const [
   
 const lookupBarcode = useCallback(
   async (rawCode: string) => {
-    const code = rawCode.trim();
+    const parsedBarcode = parsePosBarcode(rawCode);
+    const code = parsedBarcode?.code ?? '';
 
     if (!code || checkoutSubmittingRef.current
       || barcodeLookupInFlightRef.current || scanConfirmationPendingRef.current) {
@@ -1482,13 +1487,14 @@ const lookupBarcode = useCallback(
       return found;
     }
 
-    if (isUnitBarcode(code)) {
+    if (parsedBarcode?.kind === 'stock-unit') {
       try {
         const unit = await api.get<StockUnitSummary>(
-          `/api/stock-units/lookup?code=${encodeURIComponent(code)}`
+          posBarcodeLookupPath(parsedBarcode)
         );
-        if (unit.state !== 'available') {
-          toast(`Physical unit ${unit.unit_code} is ${unit.state} and cannot be sold.`, 'warning');
+        const saleProblem = stockUnitSaleProblem(unit);
+        if (saleProblem) {
+          toast(saleProblem, 'warning');
           return false;
         }
         if (Object.values(selectedStockUnits).some((selected) =>
@@ -1542,9 +1548,7 @@ const lookupBarcode = useCallback(
     try {
       const result =
         await api.get<ApiLookupResult>(
-          `/api/products/lookup/${encodeURIComponent(
-            code
-          )}`
+          posBarcodeLookupPath(parsedBarcode!)
         );
 
       setSearch('');
@@ -1843,16 +1847,17 @@ useEffect(() => {
   async function handleBarcodeSearch(
   event: React.KeyboardEvent<HTMLInputElement>
 ) {
+  const currentValue = event.currentTarget.value;
   if (
     event.key !== 'Enter' ||
-    !search.trim()
+    !currentValue.trim()
   ) {
     return;
   }
 
   event.preventDefault();
 
-  await lookupBarcode(search);
+  await lookupBarcode(currentValue);
 }
 function stopScanner() {
   scannerControlsRef.current?.stop();
@@ -2387,10 +2392,17 @@ type ApiLookupResult =
     searchRef.current?.focus();
   }, []);
   useEffect(() => {
-  const term = search.trim();
+  const parsedBarcode = parsePosBarcode(search);
+  const term = parsedBarcode?.code ?? '';
 
   if (!term) {
     setSearchResults([]);
+    return;
+  }
+
+  if (parsedBarcode?.kind === 'stock-unit') {
+    setSearchResults([]);
+    setSearching(false);
     return;
   }
 

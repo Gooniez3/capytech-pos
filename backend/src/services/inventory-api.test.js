@@ -72,8 +72,9 @@ test('stock-unit lookup gives the permanent CT code explicit precedence', async 
       if (calls.length === 1) return { rows: [{ id: 7, matched_by: 'unit_code' }] };
       if (calls.length === 2) return { rows: [{
         id: 7, unit_code: 'CT000007', internal_sku: 'SU-7',
-        manufacturer_serial_number: 'SER-7', product_id: 2, variant_id: null,
-        product_name: 'Phone', product_sku: 'PHONE', effective_price: '100',
+        manufacturer_serial_number: 'SER-7', product_id: 2, variant_id: 3,
+        product_name: 'Phone', product_sku: 'PHONE', variant_name: 'White',
+        product_is_active: true, variant_is_active: true, effective_price: '100',
         state: 'available',
       }] };
       return { rows: [] };
@@ -82,6 +83,11 @@ test('stock-unit lookup gives the permanent CT code explicit precedence', async 
   const unit = await lookupStockUnit(queryable, ' ct000007 ');
   assert.equal(unit.unit_code, 'CT000007');
   assert.equal(unit.matched_by, 'unit_code');
+  assert.equal(unit.product_id, 2);
+  assert.equal(unit.variant_id, 3);
+  assert.equal(unit.variant_name, 'White');
+  assert.equal(unit.product_is_active, true);
+  assert.equal(unit.variant_is_active, true);
   assert.match(calls[0].sql, /UPPER\(unit_code\) = UPPER\(\$1\)/);
   assert.equal(calls[0].values[0], 'ct000007');
 });

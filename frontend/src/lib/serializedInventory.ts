@@ -32,6 +32,9 @@ export interface StockUnitSummary {
   effective_serial_tracking_enabled?: boolean;
   effective_shop_warranty_enabled?: boolean;
   effective_shop_warranty_months?: WarrantyDuration | null;
+  active_assignment_id?: number | string | null;
+  product_is_active?: boolean;
+  variant_is_active?: boolean | null;
   state: StockUnitState;
 }
 

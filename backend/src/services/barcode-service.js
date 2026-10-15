@@ -1,9 +1,9 @@
 const bwipjs = require('bwip-js');
 
-async function generateBarcodeDataUrl(value) {
+function barcodeOptions(value) {
   const text = String(value || '').trim();
   if (!text) throw new Error('Barcode value is required');
-  const png = await bwipjs.toBuffer({
+  return {
     bcid: 'code128',
     text,
     scale: 3,
@@ -12,8 +12,12 @@ async function generateBarcodeDataUrl(value) {
     textxalign: 'center',
     paddingwidth: 8,
     paddingheight: 8,
-  });
+  };
+}
+
+async function generateBarcodeDataUrl(value) {
+  const png = await bwipjs.toBuffer(barcodeOptions(value));
   return `data:image/png;base64,${png.toString('base64')}`;
 }
 
-module.exports = { generateBarcodeDataUrl };
+module.exports = { barcodeOptions, generateBarcodeDataUrl };
