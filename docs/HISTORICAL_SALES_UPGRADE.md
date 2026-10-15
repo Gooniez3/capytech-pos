@@ -1,18 +1,52 @@
-# Historical Sales Reports — CapyTech POS v2 upgrade and import
+# CT barcode fixes and Historical Sales Reports — CapyTech POS v2 upgrade and import
+
+This runbook covers the combined CT barcode checkout/printing fixes and isolated
+Historical Sales Reports release. The approved **pre-documentation candidate** is:
+
+```text
+28212b7ac4c19e91b3356ec74cd23ed588e9c0e8
+```
+
+Because this runbook update changes the Git commit, that candidate is not the final
+deployable SHA. After the documentation change has been reviewed and committed,
+record and approve the resulting full **final release SHA** in the deployment record.
+Every release checkout and client fast-forward must resolve to that final SHA; do not
+deploy by a moving branch name.
 
 This runbook is only for the installed v2 shop at `~/capytech-pos-v2`, using database
 `capytech_pos_v2`, role `capytech_v2_user`, backend port `4001`, and frontend port
 `5174`. The original installation at `~/capytech-pos-shop` and its `pos_store`
 database are out of scope and must remain untouched.
 
-Do not run either fresh installer. Do not use `Update CapyTech POS.command` for this
-v2 release: the current generic updater is not the v2-specific workflow. Do not copy
-the archive into the repository, edit its CSV files, restore the old shop dump, or
-connect the v2 application to `pos_store`.
+Do not run either fresh installer: `Install CapyTech POS.command` and
+`Install CapyTech POS V2.command` are both prohibited for this upgrade. Do not use
+the generic `Update CapyTech POS.command`: it is not the v2-specific workflow. Use
+only the reviewed manual v2 procedure below. Do not copy the archive into the
+repository, edit its CSV files, restore the old shop dump, or connect the v2
+application to `pos_store`.
 
 The commands below are future operator actions. They were not run during feature
-implementation. Substitute only the reviewed release folder and approved release
-commit; do not substitute a database name.
+implementation. Substitute only the reviewed release folder and approved final
+release commit; do not substitute a database name. No client-installation file may
+be modified until the maintenance window has begun and the v2 backup in section 2
+has been created and successfully restore-verified.
+
+## 0. Release approval gate
+
+Before production deployment is approved, the exact final release checkout must
+pass all self-contained backend and frontend tests, backend syntax checks, TypeScript
+typecheck, frontend production build, ESLint, and `git diff --check`. It must also
+pass, against explicitly named disposable databases only:
+
+- every guarded PostgreSQL integration suite in `backend/scripts/*.integration.test.mjs`;
+- the Playwright suite using a dedicated database whose name matches
+  `^capytech_e2e_[a-z0-9_]+$` and a loopback database host; and
+- backup restore plus pending-migration rehearsal against an isolated
+  `capytech_verify_*` database.
+
+A skipped or unavailable database integration or Playwright suite is **NOT RUN**, not
+a pass, and blocks deployment approval. Never point a test variable at
+`capytech_pos_v2` or `pos_store`, and never use production credentials for testing.
 
 ## 1. Schedule and record the preflight
 
@@ -34,8 +68,10 @@ npm run migrate:check
 ```
 
 The Git status must be empty. Before this release, HEAD should be the approved
-ancestor `dbcfd0d1126408d59343aea9351129a38d779031`. The migration commands are
-read-only. Stop if `backend/.env` does not identify `capytech_pos_v2` and
+ancestor `dbcfd0d1126408d59343aea9351129a38d779031`. Record the installed SHA, the
+approved final release SHA, and their ancestry check in the deployment record. The
+migration commands are read-only. Stop if `backend/.env` does not identify
+`capytech_pos_v2` and
 `capytech_v2_user`, if schema drift is reported, or if any command mentions
 `pos_store` or `pos_shop`. Never print or copy `DB_PASSWORD` or `JWT_SECRET` into a
 ticket, terminal transcript, or chat.
@@ -62,18 +98,20 @@ Proceed only if `RESTORE-VERIFIED.json` is created and reports both protected-da
 matching and migration testing as successful. The rehearsal must show the four new
 historical tables are empty and that active sales, inventory, images, users,
 settings, invoices, and every protected sequence—including `invoice_number_seq`—are
-unchanged.
+unchanged. Do not modify the client checkout, install dependencies there, or apply a
+migration until this verified v2 backup and isolated restore rehearsal have passed.
 
 ## 3. Install the reviewed code without the installer
 
 The reviewed release must be a clean Git checkout of this repository, with a commit
-approved for deployment. Record its full commit as `APPROVED_RELEASE_COMMIT`.
+approved for deployment. Record its full post-documentation commit as
+`APPROVED_RELEASE_COMMIT`; it must not still be the pre-documentation candidate SHA.
 Create a rollback branch in the v2 installation, fetch that exact reviewed commit
 from the separate release folder, and require a fast-forward:
 
 ```bash
 cd "$HOME/capytech-pos-v2"
-git branch "rollback/pre-historical-sales-$(date +%Y%m%d-%H%M%S)" HEAD
+git branch "rollback/pre-ct-history-$(date +%Y%m%d-%H%M%S)" HEAD
 git fetch "/absolute/path/to/reviewed/capytech-pos-release" APPROVED_RELEASE_COMMIT
 git merge --ff-only APPROVED_RELEASE_COMMIT
 
@@ -85,9 +123,13 @@ npm run typecheck
 npm run build
 ```
 
-Do not copy or replace `backend/.env`, `frontend/certs`, `backend/storage`, the
+After the merge, confirm `git rev-parse HEAD` exactly equals the recorded final
+release SHA before continuing. Do not copy or replace `backend/.env`,
+`frontend/certs`, `backend/storage`, the
 product-image directory, or `backups`. Do not run `Install CapyTech POS V2.command`,
-`scripts/install-shop-v2.mjs`, or `scripts/prepare-customer-shop.mjs`.
+`Install CapyTech POS.command`, `scripts/install-shop-v2.mjs`,
+`scripts/install-shop.mjs`, or `scripts/prepare-customer-shop.mjs`. Do not run the
+generic `Update CapyTech POS.command`.
 
 ## 4. Apply the additive migration
 
@@ -131,6 +173,41 @@ as the owner, and perform read-only verification first:
    report, preview, and import endpoint.
 
 Do not create a test sale on the production shop merely to verify this feature.
+
+### CT and CP barcode acceptance
+
+Perform these checks without completing a production sale. Cancel any product or
+physical-unit confirmation after verifying its identity.
+
+1. In POS checkout, manually enter `CT000003` and press Return. Confirm it resolves
+   the exact available physical unit for **Aula S12 pro 1000hz**, variant **White**,
+   manufacturer serial **MSS12ProBk260800851**. It must not display “Product not
+   found,” fall back to a CP/product lookup, or select another unit.
+2. Scan an available CT label through each supported input path at the actual till:
+   the USB barcode scanner, built-in camera scanner, and wireless phone scanner.
+   Each path must resolve the same exact stock unit, product, variant, and serial.
+3. Scan representative CP product and variant barcodes. Confirm their existing
+   catalog lookup and cart behavior is unchanged and that a serialized product still
+   requires selection of its unique CT unit.
+4. Scan or manually enter known sold, retired, quarantined, assigned, inactive, and
+   otherwise unavailable CT units where such test records are safely available.
+   Every ineligible unit must be rejected before it enters the cart. Do not alter a
+   production unit merely to manufacture a test state.
+5. From Stock Units, open **Print CT Barcode** for `CT000003`. Confirm the popup shows
+   the exact CT code, product, White variant, and manufacturer serial. Open print
+   preview, cancel it, close or reuse the popup as appropriate, return to Stock Units,
+   reopen the label, and repeat printing and cancellation several times. The Stock
+   Units page and print controls must remain responsive with no automatic reprint or
+   repeated dialog loop.
+6. Verify the physical and previewed label is **50 mm × 30 mm**, is not clipped, and
+   is printed at 100%/actual size without browser “fit to page” scaling. Confirm the
+   Code 128 bars, human-readable `CT000003`, product/variant line, and serial remain
+   legible on the client printer. Scan the newly printed label through the USB
+   scanner and confirm it resolves `CT000003` exactly; cancel before sale.
+
+Any mismatch, freeze, duplicate print dialog, wrong unit, unavailable-unit acceptance,
+or CP regression blocks reopening the till. Record the browser, scanner path, printer,
+label stock, observed CT/CP code, and result in the deployment record.
 
 ## 6. Preview and import the archive
 
@@ -182,7 +259,7 @@ the pre-upgrade protected-data manifest or recorded values for:
 Only the four historical tables should gain rows. No archived row can refund, edit,
 delete, restore inventory, or generate a v2 invoice.
 
-## 8. Failure and recovery
+## 8. Failure and combined-release rollback
 
 - Validation failure: correct the operator's file selection or obtain a corrected
   archive from the record owner. Never edit the source CSVs in place.
@@ -191,9 +268,11 @@ delete, restore inventory, or generate a v2 invoice.
   only after the cause is understood.
 - Different-archive refusal: stop and design a separately reviewed replacement
   workflow. Do not delete/truncate tables or disable immutability triggers.
-- Application failure before any new v2 transaction: stop v2, switch to the recorded
-  `rollback/pre-historical-sales-*` branch, run `npm ci` in backend and frontend, and
-  start the old application. The old code ignores the additive historical tables.
+- Application, CT lookup, or printing failure before any new v2 transaction: stop v2,
+  switch to the recorded `rollback/pre-ct-history-*` branch, run `npm ci` in backend
+  and frontend, and start the old application. Verify that the checked-out SHA equals
+  the recorded pre-update SHA before starting. The old code ignores the additive
+  historical tables; do not drop them or run a down migration.
 - Migration failure: its transaction rolls back. Do not run `migrate:down`, manually
   drop tables, rerun the installer, or reset a sequence.
 - Suspected active-data change: stop v2 and investigate against the verified manifest.
@@ -204,3 +283,21 @@ transactions. Never restore over the existing v2 database and never restore into
 `pos_store`. A separately approved recovery must first restore to a new isolated
 database, verify it, preserve the failed database, stop all writers, and reconcile
 every post-backup v2 transaction before any cutover.
+
+For a normal code rollback before new active sales, use the recorded rollback branch:
+
+```bash
+cd "$HOME/capytech-pos-v2"
+git status --porcelain=v1 --untracked-files=all
+git switch rollback/pre-ct-history-TIMESTAMP
+cd backend && npm ci
+cd ../frontend && npm ci
+```
+
+Start only `Start CapyTech POS V2.command`, then repeat the read-only v2 data checks.
+If the historical archive was already imported, leave it intact; the previous code
+does not query those tables. Never delete or truncate archived rows to make rollback
+appear clean. If any new current sale, refund, void, stock change, or other live write
+occurred after the upgrade, do not switch application versions or restore a database
+until a new verified backup has been made and those writes have been explicitly
+reconciled.
