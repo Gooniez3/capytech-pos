@@ -14,6 +14,7 @@ import {
   assertPhase2BMigrationInitialState,
   assertPhase3AMigrationInitialState,
   assertPhase3DMigrationInitialState,
+  assertHistoricalSalesMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -223,6 +224,9 @@ async function main() {
         }
         if (!expected.protectedShape?.tables?.inventory_receipts) {
           await assertPhase3DMigrationInitialState(migratedClient);
+        }
+        if (!expected.protectedShape?.tables?.historical_sales_archives) {
+          await assertHistoricalSalesMigrationInitialState(migratedClient);
         }
         await captureProductionDataManifest(migratedClient);
       } finally {

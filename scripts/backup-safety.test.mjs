@@ -27,11 +27,13 @@ import {
   PHASE3A_PROTECTED_SEQUENCES,
   PHASE3A_PROTECTED_TABLE_COLUMNS,
   PHASE3D_PROTECTED_TABLE_COLUMNS,
+  HISTORICAL_PROTECTED_TABLE_COLUMNS,
   PROTECTED_SEQUENCES,
   PROTECTED_TABLE_COLUMNS,
   assertPhase2BMigrationInitialState,
   assertPhase3AMigrationInitialState,
   assertPhase3DMigrationInitialState,
+  assertHistoricalSalesMigrationInitialState,
   captureProductionDataManifest,
 } from './lib/production-data.mjs';
 
@@ -413,7 +415,8 @@ test('new manifests automatically protect the complete installed Phase 2B schema
       };
       if (sql.includes('information_schema.columns')) {
         const table = params[0];
-        const columns = PHASE3D_PROTECTED_TABLE_COLUMNS[table]
+        const columns = HISTORICAL_PROTECTED_TABLE_COLUMNS[table]
+          || PHASE3D_PROTECTED_TABLE_COLUMNS[table]
           || PHASE3A_PROTECTED_TABLE_COLUMNS[table]
           || ADDITIVE_PROTECTED_TABLE_COLUMNS[table]
           || [...PROTECTED_TABLE_COLUMNS[table], ...(OPTIONAL_PROTECTED_COLUMNS[table] || [])];
@@ -449,6 +452,31 @@ test('new manifests automatically protect the complete installed Phase 2B schema
     manifest.protectedShape.tables.inventory_receipts,
     PHASE3D_PROTECTED_TABLE_COLUMNS.inventory_receipts
   );
+  for (const [table, columns] of Object.entries(HISTORICAL_PROTECTED_TABLE_COLUMNS)) {
+    assert.deepEqual(manifest.protectedShape.tables[table], columns);
+    assert.deepEqual(manifest.tables[table], { count: '0', digest: 'empty' });
+  }
+});
+
+test('historical-sales migration rehearsal requires all four new tables to be empty', async () => {
+  const counts = new Map(Object.keys(HISTORICAL_PROTECTED_TABLE_COLUMNS).map((table) => [table, '0']));
+  const client = {
+    async query(sql, params = []) {
+      if (sql.includes('to_regclass')) return { rows: [{ present: true }] };
+      if (sql.includes('information_schema.columns')) {
+        return { rows: HISTORICAL_PROTECTED_TABLE_COLUMNS[params[0]].map((column_name) => ({ column_name })) };
+      }
+      const match = /FROM public\."([a-z_]+)"/.exec(sql);
+      if (match && sql.includes('COUNT(*)::text')) return { rows: [{ count: counts.get(match[1]) }] };
+      throw new Error(`Unexpected historical rehearsal query: ${sql}`);
+    },
+  };
+  await assertHistoricalSalesMigrationInitialState(client);
+  counts.set('historical_sales', '1');
+  await assert.rejects(
+    assertHistoricalSalesMigrationInitialState(client),
+    /unexpectedly populated public\.historical_sales/
+  );
 });
 
 test('dedicated updater cannot call destructive installation or preparation scripts', () => {
@@ -469,6 +497,8 @@ test('dedicated updater cannot call destructive installation or preparation scri
   assert.match(verifier, /assertPhase3AMigrationInitialState/);
   assert.match(source, /assertPhase3DMigrationInitialState/);
   assert.match(verifier, /assertPhase3DMigrationInitialState/);
+  assert.match(source, /assertHistoricalSalesMigrationInitialState/);
+  assert.match(verifier, /assertHistoricalSalesMigrationInitialState/);
   assert.match(source, /Reviewed release tracks protected persisted paths/);
   assert.match(source, /HTTPS certificates changed during update/);
   assert.match(source, /Pre-existing backup changed during update/);

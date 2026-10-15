@@ -1,5 +1,10 @@
 # Production-safe macOS upgrade
 
+For the separate CapyTech POS v2 historical-sales release, use
+[HISTORICAL_SALES_UPGRADE.md](HISTORICAL_SALES_UPGRADE.md). Its v2-specific backup,
+ports, database, role, migration target, and manual fast-forward procedure must not
+be substituted with this original-installation workflow.
+
 This runbook is for an **existing CapyTech POS installation with real store data**. It is not an installation guide. Never run `Install CapyTech POS.command` or `scripts/prepare-customer-shop.mjs` against an existing shop. Those workflows are only for a new, empty shop.
 
 The database, image directory, `.env`, certificates, backups, and browser profile are part of the installation. The update must be performed during a maintenance window with the POS stopped and no sales in progress.

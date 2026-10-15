@@ -145,6 +145,27 @@ export const PHASE3D_PROTECTED_TABLE_COLUMNS = Object.freeze({
   ]),
 });
 
+// Historical reports are isolated from live sales, but become customer records
+// as soon as an archive is imported. Once any table is present, require and
+// protect the complete four-table feature as one unit.
+export const HISTORICAL_PROTECTED_TABLE_COLUMNS = Object.freeze({
+  historical_sales_archives: Object.freeze([
+    'id', 'archive_digest', 'source_label', 'transaction_count', 'imported_by', 'imported_at',
+  ]),
+  historical_sales: Object.freeze([
+    'archive_id', 'legacy_id', 'invoice_number', 'created_at_text', 'sale_month', 'status',
+    'subtotal', 'tax', 'discount', 'total', 'payment_method', 'refunded_at_text', 'voided_at_text',
+  ]),
+  historical_monthly_summaries: Object.freeze([
+    'archive_id', 'sale_month', 'completed_transactions', 'completed_amount',
+    'refunded_transactions', 'refunded_amount',
+  ]),
+  historical_all_time_summaries: Object.freeze([
+    'archive_id', 'total_transactions', 'completed_transactions', 'completed_amount',
+    'refunded_transactions', 'refunded_amount',
+  ]),
+});
+
 export const PROTECTED_TABLES = Object.freeze(
   Object.keys(PROTECTED_TABLE_COLUMNS)
 );
@@ -320,6 +341,22 @@ async function currentProtectedShape(client) {
     if (missing.length) throw new Error(`Protected Phase 3D columns are missing from public.${table}: ${missing.join(', ')}`);
     tables[table] = [...columns];
   }
+  const historicalPresence = await Promise.all(
+    Object.keys(HISTORICAL_PROTECTED_TABLE_COLUMNS).map((table) => relationExists(client, table))
+  );
+  if (historicalPresence.some(Boolean) && !historicalPresence.every(Boolean)) {
+    throw new Error('Protected historical-sales schema is incomplete.');
+  }
+  if (historicalPresence.every(Boolean)) {
+    for (const [table, columns] of Object.entries(HISTORICAL_PROTECTED_TABLE_COLUMNS)) {
+      const available = await tableColumnNames(client, table);
+      const missing = columns.filter((column) => !available.has(column));
+      if (missing.length) {
+        throw new Error(`Protected historical-sales columns are missing from public.${table}: ${missing.join(', ')}`);
+      }
+      tables[table] = [...columns];
+    }
+  }
   const cpTablePresent = await relationExists(client, 'catalog_codes');
   const cpSequencePresent = await relationExists(client, 'catalog_code_seq');
   const cpEntityPresence = await Promise.all(Object.entries(CP_PROTECTED_ENTITY_COLUMNS).map(async ([table, columns]) => {
@@ -375,6 +412,25 @@ export async function assertPhase3AMigrationInitialState(client) {
       if (state.rows[0]?.last_value !== '1' || state.rows[0]?.is_called !== false) {
         throw new Error(`Phase 3A migration unexpectedly advanced public.${sequence}.`);
       }
+    }
+  }
+}
+
+export async function assertHistoricalSalesMigrationInitialState(client) {
+  for (const [table, columns] of Object.entries(HISTORICAL_PROTECTED_TABLE_COLUMNS)) {
+    if (!(await relationExists(client, table))) {
+      throw new Error(`Historical-sales table is missing: public.${table}`);
+    }
+    const available = await tableColumnNames(client, table);
+    const missing = columns.filter((column) => !available.has(column));
+    if (missing.length) {
+      throw new Error(`Historical-sales columns are missing from public.${table}: ${missing.join(', ')}`);
+    }
+    const count = await client.query(
+      `SELECT COUNT(*)::text AS count FROM public.${identifier(table)}`
+    );
+    if (count.rows[0]?.count !== '0') {
+      throw new Error(`Historical-sales migration unexpectedly populated public.${table}.`);
     }
   }
 }

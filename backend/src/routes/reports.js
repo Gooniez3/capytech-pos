@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const pool = require('../db/pool');
 const {
   requireAuth,
@@ -8,8 +9,110 @@ const {
   ReportPeriodError,
   resolveReportPeriod,
 } = require('../services/report-period');
+const {
+  FILES: HISTORICAL_FILES,
+  MAX_FILE_BYTES: HISTORICAL_MAX_FILE_BYTES,
+  HistoricalArchiveError,
+  previewArchive,
+  importArchive,
+  getHistoricalReport,
+} = require('../services/historical-sales-service');
 
 const router = express.Router();
+
+const historicalUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: HISTORICAL_MAX_FILE_BYTES,
+    files: 3,
+    fields: 4,
+  },
+}).fields(Object.keys(HISTORICAL_FILES).map((name) => ({ name, maxCount: 1 })));
+
+function receiveHistoricalFiles(req, res, next) {
+  historicalUpload(req, res, (error) => {
+    if (!error) return next();
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? `Each historical CSV must be no larger than ${HISTORICAL_MAX_FILE_BYTES} bytes.`
+      : 'Upload exactly the three expected historical CSV files.';
+    return res.status(400).json({ error: message, code: 'HISTORICAL_UPLOAD_INVALID' });
+  });
+}
+
+function historicalBuffers(req) {
+  const buffers = {};
+  for (const [field, definition] of Object.entries(HISTORICAL_FILES)) {
+    const files = req.files?.[field];
+    if (!Array.isArray(files) || files.length !== 1) {
+      throw new HistoricalArchiveError(`${definition.name} is required.`);
+    }
+    if (files[0].originalname !== definition.name) {
+      throw new HistoricalArchiveError(`${field} must be named ${definition.name}.`);
+    }
+    buffers[field] = files[0].buffer;
+  }
+  return buffers;
+}
+
+function historicalError(res, error, fallback) {
+  if (error instanceof HistoricalArchiveError) {
+    return res.status(error.status).json({ error: error.message, code: error.code });
+  }
+  console.error(fallback, error?.message || error);
+  return res.status(500).json({ error: fallback, code: 'HISTORICAL_REPORT_FAILED' });
+}
+
+/* =========================================================
+   HISTORICAL SALES (isolated, read-only reporting + admin import)
+   ========================================================= */
+
+router.get('/historical', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json(await getHistoricalReport(pool, req.query));
+  } catch (error) {
+    historicalError(res, error, 'Failed to load historical sales.');
+  }
+});
+
+router.post(
+  '/historical/preview',
+  requireAuth,
+  requireAdmin,
+  receiveHistoricalFiles,
+  (req, res) => {
+    try {
+      const { preview } = previewArchive(historicalBuffers(req), process.env.JWT_SECRET);
+      res.json(preview);
+    } catch (error) {
+      historicalError(res, error, 'Failed to preview the historical archive.');
+    }
+  }
+);
+
+router.post(
+  '/historical/import',
+  requireAuth,
+  requireAdmin,
+  receiveHistoricalFiles,
+  async (req, res) => {
+    if (req.body?.confirm !== 'IMPORT ARCHIVED SALES') {
+      return res.status(400).json({
+        error: 'Explicit import confirmation is required.',
+        code: 'HISTORICAL_CONFIRMATION_REQUIRED',
+      });
+    }
+    try {
+      const result = await importArchive(pool, historicalBuffers(req), {
+        previewToken: req.body.previewToken,
+        userId: req.user.id,
+        secret: process.env.JWT_SECRET,
+      });
+      return res.status(result.imported ? 201 : 200).json(result);
+    } catch (error) {
+      return historicalError(res, error, 'Failed to import the historical archive.');
+    }
+  }
+);
 
 function reportError(res, error, fallback) {
   if (error instanceof ReportPeriodError) {

@@ -34,7 +34,8 @@
     "test:product-images": "node --test src/services/productImageService.test.js",
     "test:warranty": "node --test src/services/warranty.test.js",
     "test:auth": "node --test src/middleware/auth.test.js",
-    "test:warranty-route": "node --test src/routes/sales-warranty.test.js"
+    "test:warranty-route": "node --test src/routes/sales-warranty.test.js",
+    "test:historical-sales": "node --test src/services/historical-sales-service.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

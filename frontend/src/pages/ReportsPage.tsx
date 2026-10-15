@@ -7,6 +7,7 @@ import {
 
 import {
   BarChart3,
+  Archive,
   Download,
   RefreshCw,
   AlertTriangle,
@@ -26,6 +27,7 @@ import {
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { HistoricalSalesPanel } from '@/components/reports/HistoricalSalesPanel';
 import ExcelJS from 'exceljs';
 
 import {
@@ -281,6 +283,7 @@ export function ReportsPage() {
   const [customTo, setCustomTo] = useState(() => localDateOnly());
   const [periodError, setPeriodError] = useState<string | null>(null);
   const reportRequestRef = useRef(0);
+  const [reportSection, setReportSection] = useState<'current' | 'historical'>('current');
 
   const [
     summary,
@@ -352,6 +355,8 @@ const [
 
   useEffect(() => {
     loadReports();
+    // The applied query is the request identity; other period fields are display metadata.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period.query]);
 
   useEffect(() => {
@@ -1361,6 +1366,19 @@ const [
     );
   }
 }
+  if (reportSection === 'historical') {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Reports"
+          subtitle="Current business reporting and isolated legacy sales history."
+        />
+        <ReportSectionTabs active={reportSection} onChange={setReportSection} />
+        <HistoricalSalesPanel />
+      </div>
+    );
+  }
+
   /* =========================================================
      LOADING
      ========================================================= */
@@ -1451,6 +1469,8 @@ const [
           </Button>
         }
       />
+
+      <ReportSectionTabs active={reportSection} onChange={setReportSection} />
 
       {/* =====================================================
           ANALYSIS TOOLBAR
@@ -2656,6 +2676,39 @@ const [
 
       </section>
 
+    </div>
+  );
+}
+
+function ReportSectionTabs({
+  active,
+  onChange,
+}: {
+  active: 'current' | 'historical';
+  onChange: (section: 'current' | 'historical') => void;
+}) {
+  return (
+    <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 shadow-sm" role="tablist" aria-label="Report sections">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={active === 'current'}
+        onClick={() => onChange('current')}
+        className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${active === 'current' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+      >
+        <BarChart3 className="h-4 w-4" />
+        Current Reports
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={active === 'historical'}
+        onClick={() => onChange('historical')}
+        className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${active === 'historical' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+      >
+        <Archive className="h-4 w-4" />
+        Historical Sales
+      </button>
     </div>
   );
 }
