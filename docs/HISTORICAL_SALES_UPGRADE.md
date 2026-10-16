@@ -93,8 +93,53 @@ node scripts/verify-backup.mjs \
   --backup "$HOME/capytech-pos-v2/backups/CapyTech_V2_TIMESTAMP" \
   --test-migrations \
   --admin-assisted \
-  --admin-user phyowaiaung
+  --admin-user phyowaiaung \
+  --pg17-to-pg16-compat
 ```
+
+The compatibility flag is required for the confirmed v2 backup produced by
+`pg_dump` 17.11 from PostgreSQL 16.15. Its custom-archive format (1.16) cannot be
+read by PostgreSQL 16 `pg_restore`, while PostgreSQL 17 emits the PostgreSQL
+17-only `SET transaction_timeout = 0;` when producing restore SQL. Before running
+the command, confirm that the required clients are already installed (do not run an
+installer during this procedure). Both PostgreSQL 17 commands must report 17.11 or
+a later security release within major version 17:
+
+```bash
+/opt/homebrew/opt/postgresql@17/bin/pg_restore --version
+/opt/homebrew/opt/postgresql@17/bin/psql --version
+/opt/homebrew/opt/postgresql@16/bin/createdb --version
+/opt/homebrew/opt/postgresql@16/bin/dropdb --version
+```
+
+Equivalent existing installations under `/usr/local/opt` or versioned
+Postgres.app directories are also detected. The verifier resolves `pg_restore` and
+its sibling `psql` from the same trusted Homebrew or Postgres.app installation,
+requires both versions to match and be at least 17.11, and rejects unrelated PATH
+copies. PostgreSQL 16 `createdb` and its sibling `dropdb` must likewise come from
+one trusted installation. After creating the
+new disposable database, the application role queries only that database and the
+verifier requires its current database name, current role, and actual server major
+version to be the generated `capytech_verify_*` name, `capytech_v2_user`, and
+PostgreSQL 16. Any mismatch stops before archive SQL is streamed and retains the new
+database. Do not use this flag for a different version mismatch or archive.
+
+In compatibility mode, PostgreSQL 17 `pg_restore` only reads the original archive
+and writes SQL to a private subprocess stream. The verifier removes exactly one
+byte-for-byte `SET transaction_timeout = 0;` line from the initial dump prologue;
+it fails closed if that line is absent, repeated in the prologue, or the prologue has
+an unexpectedly long unterminated line. The randomly keyed `\restrict` and matching
+`\unrestrict` commands emitted by PostgreSQL 17 are forwarded byte-for-byte so that
+`psql` remains in restricted mode while reading archive-derived text. PostgreSQL 17
+`psql` executes against the isolated PostgreSQL 16 database as `capytech_v2_user` after `BEGIN`,
+with `ON_ERROR_STOP`, and receives `COMMIT` only after `pg_restore` exits successfully
+and the filter finishes. No shell pipeline or intermediate SQL file is used. Any
+failure before `COMMIT` closes or rolls back the open transaction without altering
+the backup. A nonzero result after `COMMIT` is not accepted as success; the isolated
+database is retained for inspection and no verification receipt is written. Restore
+subprocesses have bounded execution times: timeout handling requests termination and
+then escalates to forced termination. A connection closed before confirmed commit is
+rolled back by PostgreSQL.
 
 The two administrator flags are an explicit opt-in for this Mac, where the restricted
 `capytech_v2_user` role does not have `CREATEDB`. The verifier uses `phyowaiaung`
@@ -107,9 +152,12 @@ from the administrator subprocesses. Restore, protected-data comparisons, and
 migration rehearsal continue to authenticate exclusively as `capytech_v2_user` with
 the application credentials copied into the backup.
 
-On success, confirm the verifier reports that it removed the isolated database and
+The verifier refuses to start if the backup already contains
+`RESTORE-VERIFIED.json`; it never deletes or overwrites an earlier receipt. A
+per-backup exclusive lock prevents simultaneous rehearsals. On success, confirm the
+verifier reports that it removed the isolated database and
 that `RESTORE-VERIFIED.json` records `isolatedDatabaseCleanup` as `removed`. The
-receipt is written only after cleanup succeeds. With an intentional
+receipt is published with exclusive atomic creation only after cleanup succeeds. With an intentional
 `--keep-database`, the successful receipt instead records `retained-by-request`.
 
 On any restore, comparison, migration, or cleanup failure, record the exact generated
@@ -119,6 +167,27 @@ investigation is complete and removal has been separately approved, set the exac
 recorded name below, require the complete `^capytech_verify_[a-z0-9_]+$` pattern,
 explicitly reject both live database names, confirm the name a second time, and remove
 only the quoted database:
+
+If a failed compatibility rehearsal already exists, do not reuse or delete it when
+retrying. The command above always creates a new unique `capytech_verify_*` database;
+retain both databases until their investigation and removal are separately approved.
+
+The guarded PostgreSQL integration test is disabled by default. Release engineering
+may enable it only against a separately approved disposable local PostgreSQL 16
+server, with generated `capytech_verify_*` databases, PostgreSQL 17.11-or-later tools,
+and the exact acknowledgement `DISPOSABLE_POSTGRESQL_16_ONLY`. It creates a synthetic
+archive, proves a successful restore, deliberately causes a restore error, confirms
+that the later synthetic table was rolled back, and removes only its own generated
+test databases. Never provide the production server or either live database to this
+test. The guard requires `CAPYTECH_VERIFY_INTEGRATION=1`, the acknowledgement above,
+loopback-only `CAPYTECH_VERIFY_INTEGRATION_HOST` and an explicitly approved
+non-5432 port,
+`CAPYTECH_VERIFY_PG17_BIN`, `CAPYTECH_VERIFY_PG16_BIN`, and dedicated disposable
+administrator/application roles that are not `phyowaiaung` or
+`capytech_v2_user`. Supply test passwords only through the approved
+secret-injection mechanism; never place them in this document, a command line, or a
+terminal transcript. A skipped integration test does not constitute a restore
+rehearsal.
 
 ```bash
 verification_database='capytech_verify_RECORDED_SUFFIX'
