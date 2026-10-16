@@ -10,6 +10,7 @@ import { UP_SQL as P10 } from '../migrations/1791676800000_p10-invoice-warranty.
 import { UP_SQL as P2B } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
 import { UP_SQL as P3A } from '../migrations/1791849600000_p3a-inventory-movements.mjs';
 import { UP_SQL as P3D } from '../migrations/1791936000000_p3d-inventory-receipts.mjs';
+import { UP_SQL as FIX01 } from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
 
 const require = createRequire(import.meta.url);
 const { withTransaction } = require('../src/services/domain-transaction');
@@ -39,7 +40,7 @@ test('product restocking is atomic, serialized-aware, concurrent, and idempotent
       assert.ok(identity.version >= 170000 && identity.version < 190000);
       assert.equal((await one(bootstrap, `SELECT COUNT(*)::integer AS count FROM pg_catalog.pg_tables WHERE schemaname='public'`)).count, 0);
       await bootstrap.query('BEGIN');
-      for (const sql of [BASELINE_SQL, P04, P06, P08, P10, P2B, P3A, P3D]) await bootstrap.query(sql);
+      for (const sql of [BASELINE_SQL, P04, P06, P08, P10, P2B, P3A, P3D, FIX01]) await bootstrap.query(sql);
       await bootstrap.query('COMMIT');
     } finally { await bootstrap.end(); }
 

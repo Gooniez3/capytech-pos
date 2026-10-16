@@ -75,9 +75,36 @@ async function selectPhysicalUnit(page: Page, serial: string, exerciseDismissals
     confirmation = await openConfirmation();
   }
   await expect(confirmation).toBeVisible();
-  await confirmation.getByRole('button', { name: 'Confirm exact unit' }).click();
+  await confirmation.getByRole('button', { name: 'Confirm & Add to Cart' }).click();
   await expect(confirmation).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: 'Complete Sale' })).toBeVisible();
+}
+
+async function addSerializedProductByCpSearch(page: Page, cpCode: string, productName: string) {
+  const search = page.getByPlaceholder('Search products or scan barcode, then press Enter...');
+  await search.fill(cpCode);
+
+  const product = page.getByRole('button', { name: new RegExp(productName) }).first();
+  await expect(product).toBeVisible();
+  await expect(product.getByText(cpCode, { exact: true })).toBeVisible();
+  await product.click();
+  await expect(page.getByText(`${productName} added to cart.`, { exact: true })).toBeVisible();
+  await search.fill('');
+}
+
+async function addProductByCpBarcode(page: Page, cpCode: string, productName: string) {
+  const search = page.getByPlaceholder('Search products or scan barcode, then press Enter...');
+  await search.fill(cpCode);
+  await search.press('Enter');
+
+  const confirmation = page.getByRole('dialog', { name: 'Scanned Product' });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByText(productName, { exact: true })).toBeVisible();
+  const barcodeField = confirmation.locator('p').filter({ hasText: /^Barcode:/ });
+  await expect(barcodeField.getByText(cpCode, { exact: true })).toBeVisible();
+  await confirmation.getByRole('button', { name: 'Confirm & Add to Cart' }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(page.getByText(`${productName} added to cart.`, { exact: true })).toBeVisible();
 }
 
 async function finishCashSale(page: Page, doubleClick = false) {
@@ -114,6 +141,7 @@ async function finishCashSale(page: Page, doubleClick = false) {
 test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflows', async ({ browser }) => {
   const adminContext = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await adminContext.newPage();
+  let firstCtCode = '';
 
   await test.step('admin login and product/variant policies', async () => {
     await login(page);
@@ -151,13 +179,19 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
     await modal.getByRole('button', { name: 'Receive units' }).click();
     await expect(page.getByText('1 stock unit received.')).toBeVisible();
 
-    await page.getByPlaceholder('Search serial, SU- code, product, or variant').fill(longSerial);
+    const stockUnitSearch = page.getByPlaceholder('Search CT code, serial, product, or variant');
+    await stockUnitSearch.fill(longSerial);
     await expect(page.getByText(longSerial, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Details' }).click();
-    await expect(page.getByRole('heading', { name: /^SU-/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /^CT\d{6,}$/ })).toBeVisible();
     await expect(page.getByText('Immutable history')).toBeVisible();
     await page.keyboard.press('Escape');
-    await page.getByPlaceholder('Search serial, SU- code, product, or variant').fill('');
+    await stockUnitSearch.fill('SN-0001');
+    const firstUnitRow = page.getByRole('row').filter({ hasText: 'SN-0001' });
+    await expect(firstUnitRow).toBeVisible();
+    firstCtCode = (await firstUnitRow.getByText(/^CT\d{6,}$/).textContent())?.trim() || '';
+    expect(firstCtCode).toMatch(/^CT\d{6,}$/);
+    await stockUnitSearch.fill('');
     const stateFilter = page.getByRole('combobox').filter({
       has: page.getByRole('option', { name: 'All states', exact: true }),
     });
@@ -180,19 +214,26 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
 
   let serializedInvoice = '';
   let serializedSaleId = 0;
-  let serializedSu = '';
+  let serializedCtCode = '';
   await test.step('serialized checkout, manual scan confirmation, and duplicate-click protection', async () => {
     await page.goto('/pos');
-    await addProduct(page, 'E2E Serialized Device');
+    expect(firstCtCode).toMatch(/^CT\d{6,}$/);
+    const productCard = page.getByRole('button', { name: /E2E Serialized Device/ }).first();
+    await expect(productCard).toBeVisible();
+    const cpCode = (await productCard.getByText(/^CP\d{6,}$/).textContent())?.trim() || '';
+    expect(cpCode).toMatch(/^CP\d{6,}$/);
+    await addSerializedProductByCpSearch(page, cpCode, 'E2E Serialized Device');
     await openCheckout(page);
-    await expect(page.getByText('Product barcodes do not identify a physical unit.')).toBeVisible();
-    await selectPhysicalUnit(page, 'SN-0001', true);
+    await expect(page.getByText('0 / 1 selected')).toBeVisible();
+    await selectPhysicalUnit(page, firstCtCode, true);
+    await expect(page.getByText('1 / 1 selected')).toBeVisible();
     const sale = await finishCashSale(page, true);
     serializedInvoice = sale.invoice;
     serializedSaleId = sale.saleId;
+    expect(serializedInvoice).toMatch(/^INV-\d+$/);
+    expect(sale.receiptText).toContain('E2E Serialized Device');
     expect(sale.receiptText).toContain('SN-0001');
-    serializedSu = sale.receiptText.match(/SU-\d+/)?.[0] || '';
-    expect(serializedSu).toMatch(/^SU-/);
+    serializedCtCode = firstCtCode;
   });
 
   let warrantyInvoice = '';
@@ -206,12 +247,19 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
     expect(sale.receiptText).toContain('6 months');
   });
 
-  await test.step('ordinary non-serialized checkout retains legacy warranty UI', async () => {
+  await test.step('CP barcode scan selects the correct ordinary product for checkout', async () => {
     await page.goto('/pos');
-    await addProduct(page, 'E2E Normal Item');
+    const productCard = page.getByRole('button', { name: /E2E Normal Item/ }).first();
+    await expect(productCard).toBeVisible();
+    const cpCode = (await productCard.getByText(/^CP\d{6,}$/).textContent())?.trim() || '';
+    expect(cpCode).toMatch(/^CP\d{6,}$/);
+    await addProductByCpBarcode(page, cpCode, 'E2E Normal Item');
     await openCheckout(page);
+    const checkout = page.getByRole('dialog', { name: 'Complete Sale' });
+    await expect(checkout.getByText('1 item • 20,000 Ks', { exact: true })).toBeVisible();
     await expect(page.getByText('Invoice Warranty')).toBeVisible();
-    await finishCashSale(page);
+    const sale = await finishCashSale(page);
+    expect(sale.receiptText).toContain('E2E Normal Item');
   });
 
   await test.step('mixed cart requires exact serialized unit selection', async () => {
@@ -222,7 +270,7 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
     await openCheckout(page);
     await expect(page.getByText('0 / 1 selected')).toBeVisible();
     await expect(page.getByRole('button', { name: /^Confirm / })).toBeDisabled();
-    await selectPhysicalUnit(page, 'SN-0002');
+    await selectPhysicalUnit(page, 'SN-0002', true);
     await expect(page.getByRole('button', { name: /^Confirm / })).toBeEnabled();
     await finishCashSale(page);
   });
@@ -261,8 +309,8 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.getByText(new RegExp(`^${serializedInvoice} · `))).toBeVisible();
 
-    await kind.selectOption('internal_sku');
-    await input.fill(serializedSu);
+    await kind.selectOption('unit_code');
+    await input.fill(serializedCtCode);
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.getByText('SN-0001', { exact: true })).toBeVisible();
   });
@@ -278,7 +326,7 @@ test('Phase 3F.2 consolidated product, inventory, checkout, and warranty workflo
     await expect(page.getByRole('cell', { name: 'Refunded', exact: true })).toBeVisible();
 
     await page.goto('/stock-units');
-    await page.getByPlaceholder('Search serial, SU- code, product, or variant').fill('SN-0001');
+    await page.getByPlaceholder('Search CT code, serial, product, or variant').fill('SN-0001');
     await expect(page.getByRole('table').getByText('quarantined', { exact: true })).toBeVisible();
   });
 

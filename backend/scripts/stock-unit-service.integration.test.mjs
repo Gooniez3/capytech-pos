@@ -8,6 +8,7 @@ import { UP_SQL as P06_UP_SQL } from '../migrations/1788652800002_p06-checkout-r
 import { UP_SQL as P08_UP_SQL } from '../migrations/1788652800003_p08-product-recycle-bin.mjs';
 import { UP_SQL as P10_UP_SQL } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 import { UP_SQL as P2B_UP_SQL } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
+import { UP_SQL as FIX01_UP_SQL } from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -100,6 +101,7 @@ test(
       await bootstrap.query(P08_UP_SQL);
       await bootstrap.query(P10_UP_SQL);
       await bootstrap.query(P2B_UP_SQL);
+      await bootstrap.query(FIX01_UP_SQL);
       await bootstrap.query('COMMIT');
     } finally {
       await bootstrap.end();

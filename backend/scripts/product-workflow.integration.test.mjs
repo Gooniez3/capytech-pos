@@ -9,6 +9,9 @@ import { UP_SQL as P08 } from '../migrations/1788652800003_p08-product-recycle-b
 import { UP_SQL as P10 } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 import { UP_SQL as P2B } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
 import { UP_SQL as P3A } from '../migrations/1791849600000_p3a-inventory-movements.mjs';
+import { UP_SQL as P3D } from '../migrations/1791936000000_p3d-inventory-receipts.mjs';
+import { UP_SQL as FIX01 } from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
+import { UP_SQL as CP } from '../migrations/1792108800000_cp-catalog-codes.mjs';
 
 const require = createRequire(import.meta.url);
 const { withTransaction } = require('../src/services/domain-transaction');
@@ -35,7 +38,7 @@ test('unified product creation and editing are atomic and preserve inventory his
       const empty = await one(bootstrap, `SELECT COUNT(*)::integer AS count FROM pg_catalog.pg_tables WHERE schemaname='public'`);
       assert.equal(empty.count, 0);
       await bootstrap.query('BEGIN');
-      for (const sql of [BASELINE_SQL, P04, P06, P08, P10, P2B, P3A]) await bootstrap.query(sql);
+      for (const sql of [BASELINE_SQL, P04, P06, P08, P10, P2B, P3A, P3D, FIX01, CP]) await bootstrap.query(sql);
       await bootstrap.query('COMMIT');
     } finally { await bootstrap.end(); }
 

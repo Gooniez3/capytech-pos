@@ -8,6 +8,9 @@ import { UP_SQL as P06_UP_SQL } from '../migrations/1788652800002_p06-checkout-r
 import { UP_SQL as P08_UP_SQL } from '../migrations/1788652800003_p08-product-recycle-bin.mjs';
 import { UP_SQL as P10_UP_SQL } from '../migrations/1791676800000_p10-invoice-warranty.mjs';
 import { UP_SQL as P2B_UP_SQL } from '../migrations/1791763200000_p2b-stock-unit-warranty-schema.mjs';
+import { UP_SQL as P3A_UP_SQL } from '../migrations/1791849600000_p3a-inventory-movements.mjs';
+import { UP_SQL as FIX01_UP_SQL } from '../migrations/1792022400000_fix01-stock-unit-barcode-codes.mjs';
+import { UP_SQL as CP_UP_SQL } from '../migrations/1792108800000_cp-catalog-codes.mjs';
 
 const require = createRequire(import.meta.url);
 const { withTransaction } = require('../src/services/domain-transaction');
@@ -85,6 +88,9 @@ test(
       await bootstrap.query(P08_UP_SQL);
       await bootstrap.query(P10_UP_SQL);
       await bootstrap.query(P2B_UP_SQL);
+      await bootstrap.query(P3A_UP_SQL);
+      await bootstrap.query(FIX01_UP_SQL);
+      await bootstrap.query(CP_UP_SQL);
       await bootstrap.query('COMMIT');
     } finally {
       await bootstrap.end();
@@ -117,8 +123,12 @@ test(
         INSERT INTO categories (name) VALUES ('Phase 2D') RETURNING id
       `);
       const insertProduct = (sku, name, stock = 0) => one(pool, `
-        INSERT INTO products (sku, name, category_id, price, cost, stock_quantity)
-        VALUES ($1, $2, $3, 100, 60, $4) RETURNING id
+        INSERT INTO products
+          (sku, product_code, name, category_id, price, cost, stock_quantity)
+        VALUES
+          ($1, format_catalog_code(nextval('catalog_code_seq'::regclass)),
+           $2, $3, 100, 60, $4)
+        RETURNING id
       `, [sku, name, category.id, stock]);
 
       const adoptedProduct = await insertProduct('P2D-ADOPT', 'Adopted API Product', 2);
@@ -179,16 +189,28 @@ test(
 
       const variantProduct = await insertProduct('P2D-VP', 'Variant Parent', 0);
       const variantA = await one(pool, `
-        INSERT INTO product_variants (product_id, name, sku, stock_quantity)
-        VALUES ($1, 'A', 'P2D-VA', 1) RETURNING id
+        INSERT INTO product_variants
+          (product_id, name, sku, product_code, stock_quantity)
+        VALUES
+          ($1, 'A', 'P2D-VA',
+           format_catalog_code(nextval('catalog_code_seq'::regclass)), 1)
+        RETURNING id
       `, [variantProduct.id]);
       const variantB = await one(pool, `
-        INSERT INTO product_variants (product_id, name, sku, stock_quantity)
-        VALUES ($1, 'B', 'P2D-VB', 1) RETURNING id
+        INSERT INTO product_variants
+          (product_id, name, sku, product_code, stock_quantity)
+        VALUES
+          ($1, 'B', 'P2D-VB',
+           format_catalog_code(nextval('catalog_code_seq'::regclass)), 1)
+        RETURNING id
       `, [variantProduct.id]);
       const variantC = await one(pool, `
-        INSERT INTO product_variants (product_id, name, sku, stock_quantity)
-        VALUES ($1, 'C', 'P2D-VC', 0) RETURNING id
+        INSERT INTO product_variants
+          (product_id, name, sku, product_code, stock_quantity)
+        VALUES
+          ($1, 'C', 'P2D-VC',
+           format_catalog_code(nextval('catalog_code_seq'::regclass)), 0)
+        RETURNING id
       `, [variantProduct.id]);
       await withTransaction(pool, (transaction) => updateInventoryPolicy(transaction, {
         actorUserId: admin.id,
@@ -236,23 +258,41 @@ test(
       assert.equal(inheritedAgain.effective_shop_warranty_months, 6);
 
       const legacyProduct = await insertProduct('P2D-LEGACY', 'Legacy Quantity Product', 1);
-      await restoreExactInventory(pool, [{
+      const quantityReversalSale = await one(pool, `
+        INSERT INTO sales
+          (invoice_number, user_id, subtotal, tax, discount, total,
+           payment_method, status, checkout_contract_version)
+        VALUES ('P2D-QUANTITY-RETURN-001', $1, 100, 0, 0, 100,
+                'cash', 'completed', 2)
+        RETURNING id
+      `, [cashier.id]);
+      const reversalContext = {
+        action: 'refunded',
+        saleId: quantityReversalSale.id,
+        actorUserId: admin.id,
+        reason: 'Phase 2D quantity return verification',
+      };
+      await withTransaction(pool, (transaction) => restoreExactInventory(transaction, [{
         product_id: legacyProduct.id, variant_id: null, quantity: 1,
-      }]);
+      }], reversalContext));
       assert.equal((await one(pool, `
         SELECT stock_quantity::integer AS quantity FROM products WHERE id = $1
       `, [legacyProduct.id])).quantity, 2);
       await assert.rejects(
-        restoreExactInventory(pool, [{
+        withTransaction(pool, (transaction) => restoreExactInventory(transaction, [{
           product_id: adoptedProduct.id, variant_id: null, quantity: 1,
-        }]),
-        (error) => error.statusCode === 409 && /serialized return workflow/.test(error.message)
+        }], reversalContext)),
+        (error) => error.statusCode === 409
+          && error.code === 'DIRECT_QUANTITY_EDIT_FORBIDDEN'
+          && /serialized inventory/.test(error.message)
       );
       await assert.rejects(
-        restoreExactInventory(pool, [{
+        withTransaction(pool, (transaction) => restoreExactInventory(transaction, [{
           product_id: variantProduct.id, variant_id: variantA.id, quantity: 1,
-        }]),
-        (error) => error.statusCode === 409 && /serialized return workflow/.test(error.message)
+        }], reversalContext)),
+        (error) => error.statusCode === 409
+          && error.code === 'DIRECT_QUANTITY_EDIT_FORBIDDEN'
+          && /serialized inventory/.test(error.message)
       );
 
       const variantsResponse = await invokeRoute(
