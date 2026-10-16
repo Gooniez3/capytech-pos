@@ -91,8 +91,60 @@ and rehearse all pending migrations in a disposable `capytech_verify_*` database
 cd "/absolute/path/to/reviewed/capytech-pos-release"
 node scripts/verify-backup.mjs \
   --backup "$HOME/capytech-pos-v2/backups/CapyTech_V2_TIMESTAMP" \
-  --test-migrations
+  --test-migrations \
+  --admin-assisted \
+  --admin-user phyowaiaung
 ```
+
+The two administrator flags are an explicit opt-in for this Mac, where the restricted
+`capytech_v2_user` role does not have `CREATEDB`. The verifier uses `phyowaiaung`
+only to create a uniquely generated and validated `capytech_verify_*` database owned
+by `capytech_v2_user`, and to drop that same database after successful verification.
+If PostgreSQL requests the administrator password, enter it only at the terminal
+prompt. Never put it in this command, export it as `PGPASSWORD`, add it to either
+`.env`, or save it inside the backup. The verifier removes inherited `PG*` variables
+from the administrator subprocesses. Restore, protected-data comparisons, and
+migration rehearsal continue to authenticate exclusively as `capytech_v2_user` with
+the application credentials copied into the backup.
+
+On success, confirm the verifier reports that it removed the isolated database and
+that `RESTORE-VERIFIED.json` records `isolatedDatabaseCleanup` as `removed`. The
+receipt is written only after cleanup succeeds. With an intentional
+`--keep-database`, the successful receipt instead records `retained-by-request`.
+
+On any restore, comparison, migration, or cleanup failure, record the exact generated
+`capytech_verify_*` name printed by the verifier and leave that database in place for
+investigation. Cleanup after a failed rehearsal is never automatic. Only after the
+investigation is complete and removal has been separately approved, set the exact
+recorded name below, require the complete `^capytech_verify_[a-z0-9_]+$` pattern,
+explicitly reject both live database names, confirm the name a second time, and remove
+only the quoted database:
+
+```bash
+verification_database='capytech_verify_RECORDED_SUFFIX'
+
+if [[ ! "$verification_database" =~ ^capytech_verify_[a-z0-9_]+$ ]]; then
+  echo "Refusing unsafe verification database name."
+  exit 1
+fi
+if [[ "$verification_database" == 'capytech_pos_v2' || "$verification_database" == 'pos_store' ]]; then
+  echo "Refusing to remove a live database."
+  exit 1
+fi
+read -r -p "Type the exact verification database name to approve removal: " confirmation
+if [[ "$confirmation" != "$verification_database" ]]; then
+  echo "Confirmation did not match. Nothing was removed."
+  exit 1
+fi
+
+dropdb --host 127.0.0.1 --port 5432 \
+  --username phyowaiaung --maintenance-db postgres --if-exists \
+  "$verification_database"
+```
+
+Never substitute `capytech_pos_v2`, `pos_store`, or any other database name in the
+verification or cleanup commands, and never run this cleanup merely because a
+rehearsal failed.
 
 Proceed only if `RESTORE-VERIFIED.json` is created and reports both protected-data
 matching and migration testing as successful. The rehearsal must show the four new

@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   assertDataManifestEqual,
   assertMigrationDataPreserved,
@@ -21,17 +22,224 @@ import {
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isWindows = process.platform === 'win32';
 
-function parseArguments(args) {
-  const backupIndex = args.indexOf('--backup');
-  if (backupIndex < 0 || !args[backupIndex + 1]) {
-    throw new Error('Usage: node scripts/verify-backup.mjs --backup <backup-folder> [--test-migrations] [--keep-database]');
+const USAGE = 'Usage: node scripts/verify-backup.mjs --backup <backup-folder> [--test-migrations] [--keep-database] [--admin-assisted --admin-user <role>]';
+const IDENTIFIER_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
+const LIVE_DATABASES = new Set(['capytech_pos_v2', 'pos_store']);
+
+export function assertDatabaseIdentifier(value, label = 'Database name') {
+  if (!IDENTIFIER_PATTERN.test(String(value || ''))) {
+    throw new Error(`${label} is not a safe PostgreSQL identifier.`);
   }
-  const allowed = new Set(['--backup', args[backupIndex + 1], '--test-migrations', '--keep-database']);
-  if (args.some((value) => !allowed.has(value))) throw new Error('Unknown restore-verification option.');
+  return value;
+}
+
+export function assertRoleIdentifier(value, label = 'Database role') {
+  if (!IDENTIFIER_PATTERN.test(String(value || ''))) {
+    throw new Error(`${label} is not a safe PostgreSQL identifier.`);
+  }
+  return value;
+}
+
+export function parseArguments(args) {
+  const parsed = {
+    backup: null,
+    keepDatabase: false,
+    testMigrations: false,
+    adminAssisted: false,
+    adminUser: null,
+  };
+  const seen = new Set();
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index];
+    if (seen.has(option)) throw new Error(`Duplicate restore-verification option: ${option}`);
+    seen.add(option);
+    if (option === '--backup' || option === '--admin-user') {
+      const value = args[index + 1];
+      if (!value || value.startsWith('--')) throw new Error(USAGE);
+      if (option === '--backup') parsed.backup = path.resolve(value);
+      else parsed.adminUser = assertRoleIdentifier(value, 'Administrator role');
+      index += 1;
+    } else if (option === '--test-migrations') {
+      parsed.testMigrations = true;
+    } else if (option === '--keep-database') {
+      parsed.keepDatabase = true;
+    } else if (option === '--admin-assisted') {
+      parsed.adminAssisted = true;
+    } else {
+      throw new Error(`Unknown restore-verification option: ${option || '(empty)'}`);
+    }
+  }
+  if (!parsed.backup) throw new Error(USAGE);
+  if (parsed.adminAssisted !== Boolean(parsed.adminUser)) {
+    throw new Error('--admin-assisted and --admin-user <role> must be supplied together.');
+  }
+  return parsed;
+}
+
+export function resolveDatabaseActors(args, env) {
+  const applicationUser = assertRoleIdentifier(env.DB_USER, 'Application database role');
+  assertDatabaseIdentifier(env.DB_NAME, 'Production database name');
+  if (
+    args.adminAssisted
+    && (
+      env.DB_NAME !== 'capytech_pos_v2'
+      || applicationUser !== 'capytech_v2_user'
+      || !['localhost', '127.0.0.1', '::1'].includes(env.DB_HOST)
+      || String(env.DB_PORT) !== '5432'
+    )
+  ) {
+    throw new Error(
+      'Administrator-assisted verification requires the local CapyTech v2 database and restricted role.'
+    );
+  }
+  if (args.adminAssisted && args.adminUser === applicationUser) {
+    throw new Error('Administrator role must be different from the restricted application role.');
+  }
   return {
-    backup: path.resolve(args[backupIndex + 1]),
-    keepDatabase: args.includes('--keep-database'),
-    testMigrations: args.includes('--test-migrations'),
+    applicationUser,
+    lifecycleUser: args.adminAssisted ? args.adminUser : applicationUser,
+    adminAssisted: args.adminAssisted,
+  };
+}
+
+export async function runVerificationLifecycle({
+  createDatabase,
+  verifyDatabase,
+  dropDatabase,
+  keepDatabase = false,
+  onRetained = () => {},
+}) {
+  let created = false;
+  let verified = false;
+  try {
+    await createDatabase();
+    created = true;
+    await verifyDatabase();
+    verified = true;
+  } finally {
+    if (created && verified && !keepDatabase) {
+      try {
+        await dropDatabase();
+      } catch (error) {
+        onRetained();
+        throw error;
+      }
+    } else if (created) {
+      onRetained();
+    }
+  }
+  return { created, verified, removed: !keepDatabase };
+}
+
+export function environmentWithoutPostgresVariables(environment = process.env) {
+  const databaseKeys = new Set([
+    'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
+  ]);
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => {
+      const normalized = key.toUpperCase();
+      return !normalized.startsWith('PG') && !databaseKeys.has(normalized);
+    })
+  );
+}
+
+export function applicationCommandEnvironment(env, environment = process.env) {
+  return {
+    ...environmentWithoutPostgresVariables(environment),
+    PGPASSWORD: env.DB_PASSWORD,
+  };
+}
+
+export function migrationCommandEnvironment(env, databaseName, environment = process.env) {
+  return {
+    ...environmentWithoutPostgresVariables(environment),
+    DB_HOST: env.DB_HOST,
+    DB_PORT: env.DB_PORT,
+    DB_NAME: databaseName,
+    DB_USER: env.DB_USER,
+    DB_PASSWORD: env.DB_PASSWORD,
+  };
+}
+
+export async function runVerificationDatabaseCommands({
+  runCommand,
+  tools,
+  connectionArgs,
+  actors,
+  databaseName,
+  productionDatabaseName,
+  dumpFile,
+  administratorEnvironment,
+  applicationEnvironment,
+  keepDatabase,
+  verifyDatabase,
+  onRemoved = () => {},
+  onRetained = () => {},
+}) {
+  assertSafeVerificationDatabase(databaseName, productionDatabaseName);
+  if (LIVE_DATABASES.has(databaseName)) {
+    throw new Error('Verification database must never be a live CapyTech database.');
+  }
+  const administratorOptions = {
+    env: administratorEnvironment,
+    replaceEnv: true,
+    interactive: actors.adminAssisted,
+  };
+  const applicationOptions = {
+    env: applicationEnvironment,
+    replaceEnv: true,
+  };
+  return runVerificationLifecycle({
+    keepDatabase,
+    createDatabase: () => runCommand(
+      tools.createdb,
+      [
+        ...connectionArgs,
+        '--username', actors.lifecycleUser,
+        '--maintenance-db', 'postgres',
+        '--owner', actors.applicationUser,
+        databaseName,
+      ],
+      administratorOptions
+    ),
+    verifyDatabase: async () => {
+      await runCommand(tools.pgRestore, [
+        ...connectionArgs,
+        '--username', actors.applicationUser,
+        '--dbname', databaseName,
+        '--exit-on-error',
+        '--single-transaction',
+        '--no-owner',
+        '--no-acl',
+        dumpFile,
+      ], applicationOptions);
+      await verifyDatabase();
+    },
+    dropDatabase: async () => {
+      await runCommand(
+        tools.dropdb,
+        [
+          ...connectionArgs,
+          '--username', actors.lifecycleUser,
+          '--maintenance-db', 'postgres',
+          '--if-exists', databaseName,
+        ],
+        administratorOptions
+      );
+      onRemoved();
+    },
+    onRetained,
+  });
+}
+
+export function verificationReceipt(databaseName, testMigrations, lifecycle) {
+  return {
+    verifiedAt: new Date().toISOString(),
+    isolatedDatabase: databaseName,
+    protectedDataMatched: true,
+    imageReferencesMatched: true,
+    migrationsTested: testMigrations,
+    isolatedDatabaseCleanup: lifecycle.removed ? 'removed' : 'retained-by-request',
   };
 }
 
@@ -68,13 +276,15 @@ function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd || projectRoot,
-      env: { ...process.env, ...(options.env || {}) },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: options.replaceEnv ? options.env : { ...process.env, ...(options.env || {}) },
+      stdio: options.interactive ? 'inherit' : ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
     let output = '';
-    child.stdout.on('data', (value) => { output += value; });
-    child.stderr.on('data', (value) => { output += value; });
+    if (!options.interactive) {
+      child.stdout.on('data', (value) => { output += value; });
+      child.stderr.on('data', (value) => { output += value; });
+    }
     child.on('error', reject);
     child.on('exit', (code) => {
       if (code === 0) resolve(output);
@@ -101,8 +311,8 @@ function assertImagesPresent(backupRoot, references) {
   }
 }
 
-async function main() {
-  const args = parseArguments(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArguments(argv);
   const completeFile = path.join(args.backup, 'BACKUP-COMPLETE.json');
   if (!fs.existsSync(completeFile)) throw new Error('Backup is incomplete; completion marker is missing.');
   verifyChecksumManifest(args.backup);
@@ -113,6 +323,7 @@ async function main() {
     throw new Error('Backup configuration or protected-data manifest is missing.');
   }
   const env = loadEnv(envFile);
+  const actors = resolveDatabaseActors(args, env);
   const expected = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
   assertImagesPresent(args.backup, expected.imageReferences);
 
@@ -122,32 +333,27 @@ async function main() {
   if (!pgRestore || !createdb || !dropdb) throw new Error('PostgreSQL restore tools are required.');
 
   const databaseName = assertSafeVerificationDatabase(
-    `capytech_verify_${Date.now()}`,
+    `capytech_verify_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`,
     env.DB_NAME
   );
   const connectionArgs = ['--host', env.DB_HOST, '--port', env.DB_PORT];
-  const passwordEnv = { PGPASSWORD: env.DB_PASSWORD };
-  let created = false;
-  let verified = false;
+  const applicationEnvironment = applicationCommandEnvironment(env);
+  const administratorEnvironment = actors.adminAssisted
+    ? environmentWithoutPostgresVariables()
+    : applicationEnvironment;
 
-  try {
-    await run(
-      createdb,
-      [...connectionArgs, '--username', env.DB_USER, '--owner', env.DB_USER, databaseName],
-      { env: passwordEnv }
-    );
-    created = true;
-    await run(pgRestore, [
-      ...connectionArgs,
-      '--username', env.DB_USER,
-      '--dbname', databaseName,
-      '--exit-on-error',
-      '--single-transaction',
-      '--no-owner',
-      '--no-acl',
-      findDump(path.join(args.backup, 'database')),
-    ], { env: passwordEnv });
-
+  const lifecycle = await runVerificationDatabaseCommands({
+    runCommand: run,
+    tools: { createdb, pgRestore, dropdb },
+    connectionArgs,
+    actors,
+    databaseName,
+    productionDatabaseName: env.DB_NAME,
+    dumpFile: findDump(path.join(args.backup, 'database')),
+    administratorEnvironment,
+    applicationEnvironment,
+    keepDatabase: args.keepDatabase,
+    verifyDatabase: async () => {
     const requireFromBackend = createRequire(path.join(projectRoot, 'backend', 'package.json'));
     const { Client } = requireFromBackend('pg');
     const client = new Client({
@@ -177,13 +383,8 @@ async function main() {
         npm,
         ['run', 'migrate:up', '--', '--database', databaseName],
         {
-          env: {
-            DB_HOST: env.DB_HOST,
-            DB_PORT: env.DB_PORT,
-            DB_NAME: databaseName,
-            DB_USER: env.DB_USER,
-            DB_PASSWORD: env.DB_PASSWORD,
-          },
+          env: migrationCommandEnvironment(env, databaseName),
+          replaceEnv: true,
           cwd: path.join(projectRoot, 'backend'),
         }
       );
@@ -233,35 +434,25 @@ async function main() {
         await migratedClient.end();
       }
     }
-    verified = true;
-
-    fs.writeFileSync(
-      path.join(args.backup, 'RESTORE-VERIFIED.json'),
-      `${JSON.stringify({
-        verifiedAt: new Date().toISOString(),
-        isolatedDatabase: databaseName,
-        protectedDataMatched: true,
-        imageReferencesMatched: true,
-        migrationsTested: args.testMigrations,
-      }, null, 2)}\n`,
-      'utf8'
-    );
-    console.log(`Restore verification passed in isolated database ${databaseName}.`);
-  } finally {
-    if (created && verified && !args.keepDatabase) {
-      await run(
-        dropdb,
-        [...connectionArgs, '--username', env.DB_USER, '--if-exists', databaseName],
-        { env: passwordEnv }
-      );
+    },
+    onRemoved: () => {
       console.log('Removed the verified isolated database. Production was never modified.');
-    } else if (created) {
+    },
+    onRetained: () => {
       console.log(`Verification database retained for inspection: ${databaseName}`);
-    }
-  }
+    },
+  });
+  fs.writeFileSync(
+    path.join(args.backup, 'RESTORE-VERIFIED.json'),
+    `${JSON.stringify(verificationReceipt(databaseName, args.testMigrations, lifecycle), null, 2)}\n`,
+    'utf8'
+  );
+  console.log(`Restore verification passed in isolated database ${databaseName}.`);
 }
 
-await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : 'Backup restore verification failed.');
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : 'Backup restore verification failed.');
+    process.exitCode = 1;
+  });
+}
